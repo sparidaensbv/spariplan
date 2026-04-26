@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo, useCallback } from 'react'
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 
 const DAGEN = [
@@ -9,71 +9,168 @@ const DAGEN = [
   { key: 5, label: 'Vr', volledig: 'Vrijdag' },
 ]
 
+// Tijd: 06:00 - 20:00, per kwartier
+const SLOT_MIN = 15
+const START_UUR = 6
+const EIND_UUR = 20
+const SLOT_HOOGTE_PX = 14  // hoogte per kwartier
+const TOTAAL_SLOTS = ((EIND_UUR - START_UUR) * 60) / SLOT_MIN
+
+// Bereken Pasen (Meeus algoritme) → vandaaruit Hemelvaart, Pinksteren
+function getPasen(jaar) {
+  const a = jaar % 19
+  const b = Math.floor(jaar / 100)
+  const c = jaar % 100
+  const d = Math.floor(b / 4)
+  const e = b % 4
+  const f = Math.floor((b + 8) / 25)
+  const g = Math.floor((b - f + 1) / 3)
+  const h = (19 * a + b - d - g + 15) % 30
+  const i = Math.floor(c / 4)
+  const k = c % 4
+  const l = (32 + 2 * e + 2 * i - h - k) % 7
+  const m = Math.floor((a + 11 * h + 22 * l) / 451)
+  const maand = Math.floor((h + l - 7 * m + 114) / 31)
+  const dag = ((h + l - 7 * m + 114) % 31) + 1
+  return new Date(jaar, maand - 1, dag)
+}
+
+function getCAOFeestdagen(jaar) {
+  const pasen = getPasen(jaar)
+  const tweedePaasdag = new Date(pasen); tweedePaasdag.setDate(pasen.getDate() + 1)
+  const hemelvaart = new Date(pasen); hemelvaart.setDate(pasen.getDate() + 39)
+  const tweedePinksterdag = new Date(pasen); tweedePinksterdag.setDate(pasen.getDate() + 50)
+  
+  const lijst = [
+    { datum: new Date(jaar, 0, 1), naam: 'Nieuwjaarsdag' },
+    { datum: tweedePaasdag, naam: '2e Paasdag' },
+    { datum: new Date(jaar, 3, 27), naam: 'Koningsdag' },
+    { datum: hemelvaart, naam: 'Hemelvaartsdag' },
+    { datum: tweedePinksterdag, naam: '2e Pinksterdag' },
+    { datum: new Date(jaar, 11, 25), naam: '1e Kerstdag' },
+    { datum: new Date(jaar, 11, 26), naam: '2e Kerstdag' },
+  ]
+  // Lustrumjaren: 2025, 2030, etc.
+  if (jaar % 5 === 0) {
+    lijst.push({ datum: new Date(jaar, 4, 5), naam: 'Bevrijdingsdag' })
+  }
+  return lijst
+}
+
+function isFeestdag(date, feestdagen) {
+  const dStr = toDateStr(date)
+  return feestdagen.find(f => toDateStr(f.datum) === dStr)
+}
+
+function toDateStr(d) {
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
+}
+
+function getISOWeek(d) {
+  d = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()))
+  d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7))
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1))
+  return {
+    year: d.getUTCFullYear(),
+    week: Math.ceil((((d - yearStart) / 86400000) + 1) / 7)
+  }
+}
+
+function datumVoorDag(jaar, week, dagNr) {
+  const jan4 = new Date(jaar, 0, 4)
+  const dayOfWeek = jan4.getDay() || 7
+  const week1Monday = new Date(jan4)
+  week1Monday.setDate(jan4.getDate() - dayOfWeek + 1)
+  const targetMonday = new Date(week1Monday)
+  targetMonday.setDate(week1Monday.getDate() + (week - 1) * 7)
+  const target = new Date(targetMonday)
+  target.setDate(targetMonday.getDate() + (dagNr - 1))
+  return target
+}
+
+function tijdNaarSlot(tijdStr) {
+  if (!tijdStr) return null
+  const [h, m] = tijdStr.split(':').map(Number)
+  const totaalMin = h * 60 + m
+  return Math.floor((totaalMin - START_UUR * 60) / SLOT_MIN)
+}
+
+function slotNaarTijd(slot) {
+  const totaalMin = START_UUR * 60 + slot * SLOT_MIN
+  const h = Math.floor(totaalMin / 60)
+  const m = totaalMin % 60
+  return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`
+}
+
 export default function Planning() {
   const [taken, setTaken] = useState([])
   const [medewerkers, setMedewerkers] = useState([])
   const [loading, setLoading] = useState(true)
-  const [selectedWeek, setSelectedWeek] = useState(null)
+  const [huidigJaar, setHuidigJaar] = useState(2026)
+  const [huidigWeek, setHuidigWeek] = useState(null)
   const [draggedTaak, setDraggedTaak] = useState(null)
   const [dragOver, setDragOver] = useState(null)
   const [savingId, setSavingId] = useState(null)
   const [bevestigen, setBevestigen] = useState(false)
   const [bericht, setBericht] = useState(null)
   const [poolZoek, setPoolZoek] = useState('')
+  const [werkelijkeTijden, setWerkelijkeTijden] = useState({})
+  const datepickerRef = useRef(null)
 
   useEffect(() => { laadAlles() }, [])
 
   async function laadAlles() {
-    const [takenRes, medewerkersRes] = await Promise.all([
+    const [takenRes, medewerkersRes, historieRes] = await Promise.all([
       supabase.from('taken').select(`
-        id, jaar, weeknummer, geplande_datum, geplande_minuten, vaste_prijs, status, 
-        bijzondere_instructie, medewerker_id, route_volgorde,
+        id, klant_dienst_id, klant_id, dienst_id, jaar, weeknummer, geplande_datum, geplande_tijd_start, geplande_minuten, vaste_prijs, status, 
+        bijzondere_instructie, medewerker_id, route_volgorde, werkelijke_minuten,
         klant:klanten(naam, regio, adres),
         dienst:diensten(naam)
       `).order('weeknummer'),
-      supabase.from('medewerkers').select('*').eq('actief', true).order('naam')
+      supabase.from('medewerkers').select('*').eq('actief', true).order('naam'),
+      supabase.from('taken').select('klant_dienst_id, werkelijke_minuten').not('werkelijke_minuten', 'is', null)
     ])
     setTaken(takenRes.data || [])
     setMedewerkers(medewerkersRes.data || [])
-    if (takenRes.data && takenRes.data.length > 0 && !selectedWeek) {
+    
+    // Bereken gemiddelde werkelijke tijd per klant_dienst_id (laatste 3 keer)
+    const groepen = {}
+    ;(historieRes.data || []).forEach(h => {
+      if (!h.klant_dienst_id || !h.werkelijke_minuten) return
+      if (!groepen[h.klant_dienst_id]) groepen[h.klant_dienst_id] = []
+      groepen[h.klant_dienst_id].push(h.werkelijke_minuten)
+    })
+    const gemiddelden = {}
+    Object.keys(groepen).forEach(id => {
+      const laatste = groepen[id].slice(-3)
+      gemiddelden[id] = Math.round(laatste.reduce((s,v) => s+v, 0) / laatste.length)
+    })
+    setWerkelijkeTijden(gemiddelden)
+    
+    // Initieel week selecteren
+    if (takenRes.data && takenRes.data.length > 0 && !huidigWeek) {
       const eersteWeek = takenRes.data[0]
-      setSelectedWeek(`${eersteWeek.jaar}-${eersteWeek.weeknummer}`)
+      setHuidigJaar(eersteWeek.jaar)
+      setHuidigWeek(eersteWeek.weeknummer)
     }
     setLoading(false)
   }
 
-  const weken = useMemo(() => {
-    const set = new Set(taken.map(t => `${t.jaar}-${t.weeknummer}`))
-    return Array.from(set).sort()
-  }, [taken])
+  const feestdagen = useMemo(() => getCAOFeestdagen(huidigJaar), [huidigJaar])
 
   const takenInWeek = useMemo(() => {
-    if (!selectedWeek) return []
-    const [jaar, week] = selectedWeek.split('-').map(Number)
-    return taken.filter(t => t.jaar === jaar && t.weeknummer === week)
-  }, [taken, selectedWeek])
+    return taken.filter(t => t.jaar === huidigJaar && t.weeknummer === huidigWeek)
+  }, [taken, huidigJaar, huidigWeek])
 
-  function datumVoorDag(jaar, week, dagNr) {
-    const jan4 = new Date(jaar, 0, 4)
-    const dayOfWeek = jan4.getDay() || 7
-    const week1Monday = new Date(jan4)
-    week1Monday.setDate(jan4.getDate() - dayOfWeek + 1)
-    const targetMonday = new Date(week1Monday)
-    targetMonday.setDate(week1Monday.getDate() + (week - 1) * 7)
-    const target = new Date(targetMonday)
-    target.setDate(targetMonday.getDate() + (dagNr - 1))
-    return target
-  }
-
-  // Wat zit waar?
-  const grid = useMemo(() => {
+  // Splits in pool en grid
+  const { grid, pool } = useMemo(() => {
     const result = {}
     medewerkers.forEach(m => {
       result[m.id] = {}
       DAGEN.forEach(d => { result[m.id][d.key] = [] })
     })
     
-    const pool = []  // Niet-toegewezen of geen dag = pool
+    const poolTaken = []
 
     takenInWeek.forEach(t => {
       let dagNr = null
@@ -89,39 +186,73 @@ export default function Planning() {
       if (heeftMedewerker && heeftDag && result[t.medewerker_id]) {
         result[t.medewerker_id][dagNr].push(t)
       } else {
-        pool.push(t)
+        poolTaken.push(t)
       }
     })
     
-    return { grid: result, pool }
+    return { grid: result, pool: poolTaken }
   }, [takenInWeek, medewerkers])
 
+  // Bereken positie van taken in tijd-grid (cumulatief stapelen vanaf 8:00)
+  const positiesInDag = useMemo(() => {
+    const result = {}  // {medId: {dagKey: [{taak, slotStart, slotLengte}]}}
+    
+    medewerkers.forEach(m => {
+      result[m.id] = {}
+      DAGEN.forEach(d => {
+        const dayTaken = grid[m.id]?.[d.key] || []
+        // Sorteer op route_volgorde of geplande_tijd_start
+        const sorted = [...dayTaken].sort((a, b) => {
+          if (a.geplande_tijd_start && b.geplande_tijd_start) {
+            return a.geplande_tijd_start.localeCompare(b.geplande_tijd_start)
+          }
+          return (a.route_volgorde || 0) - (b.route_volgorde || 0)
+        })
+        
+        // Plaats elke taak: gebruik geplande_tijd_start of stack vanaf 8:00
+        let cursor = tijdNaarSlot('08:00')
+        const items = []
+        sorted.forEach(t => {
+          const minuten = t.geplande_minuten || 60
+          const slotLengte = Math.max(1, Math.ceil(minuten / SLOT_MIN))
+          let slotStart = cursor
+          if (t.geplande_tijd_start) {
+            const explicietSlot = tijdNaarSlot(t.geplande_tijd_start)
+            if (explicietSlot !== null && explicietSlot >= 0) slotStart = explicietSlot
+          }
+          if (slotStart + slotLengte > TOTAAL_SLOTS) {
+            slotStart = Math.max(0, TOTAAL_SLOTS - slotLengte)
+          }
+          items.push({ taak: t, slotStart, slotLengte })
+          cursor = slotStart + slotLengte
+        })
+        result[m.id][d.key] = items
+      })
+    })
+    return result
+  }, [grid, medewerkers])
+
   const poolGefilterd = useMemo(() => {
-    if (!poolZoek) return grid.pool
+    if (!poolZoek) return pool
     const z = poolZoek.toLowerCase()
-    return grid.pool.filter(t => 
+    return pool.filter(t => 
       (t.klant?.naam || '').toLowerCase().includes(z) ||
       (t.klant?.regio || '').toLowerCase().includes(z) ||
+      (t.klant?.adres || '').toLowerCase().includes(z) ||
       (t.dienst?.naam || '').toLowerCase().includes(z)
     )
-  }, [grid.pool, poolZoek])
-
-  function celBelasting(medId, dagKey) {
-    const cellTaken = grid.grid[medId]?.[dagKey] || []
-    return cellTaken.reduce((s, t) => s + (t.geplande_minuten || 0), 0)
-  }
+  }, [pool, poolZoek])
 
   function medewerkerTotaal(medId) {
-    let totaalMin = 0, aantalTaken = 0, omzet = 0
+    let totaalMin = 0, aantalTaken = 0
     DAGEN.forEach(d => {
-      const cellTaken = grid.grid[medId]?.[d.key] || []
+      const cellTaken = grid[medId]?.[d.key] || []
       cellTaken.forEach(t => {
         totaalMin += t.geplande_minuten || 0
         aantalTaken += 1
-        omzet += parseFloat(t.vaste_prijs || 0)
       })
     })
-    return { minuten: totaalMin, taken: aantalTaken, omzet }
+    return { minuten: totaalMin, taken: aantalTaken }
   }
 
   // === DRAG & DROP ===
@@ -130,7 +261,6 @@ export default function Planning() {
     e.dataTransfer.effectAllowed = 'move'
     e.dataTransfer.setData('text/plain', taak.id)
     
-    // Maak een mooi sleep-image
     const dragImage = document.createElement('div')
     dragImage.style.cssText = `
       position: absolute; top: -1000px; left: -1000px;
@@ -150,38 +280,45 @@ export default function Planning() {
     setDragOver(null)
   }, [])
 
-  const onDragOver = useCallback((e, medId, dagKey) => {
+  const onDragOver = useCallback((e, medId, dagKey, slot) => {
     e.preventDefault()
     e.dataTransfer.dropEffect = 'move'
-    const dragKey = `${medId}-${dagKey}`
+    const dragKey = slot !== undefined ? `${medId}-${dagKey}-${slot}` : `${medId}-${dagKey}`
     if (dragOver !== dragKey) setDragOver(dragKey)
   }, [dragOver])
 
-  const onDrop = useCallback(async (e, medId, dagKey) => {
+  const onDrop = useCallback(async (e, medId, dagKey, slot) => {
     e.preventDefault()
     setDragOver(null)
     if (!draggedTaak) return
 
-    const [jaar, week] = selectedWeek.split('-').map(Number)
     const newMedewerkerId = medId === 'pool' ? null : medId
     let newDatum = null
+    let newTijdStart = null
     if (medId !== 'pool' && dagKey !== null) {
-      const d = datumVoorDag(jaar, week, dagKey)
+      const d = datumVoorDag(huidigJaar, huidigWeek, dagKey)
       newDatum = d.toISOString().slice(0, 10)
+      if (slot !== undefined && slot !== null) {
+        newTijdStart = slotNaarTijd(slot)
+      }
     }
 
     setSavingId(draggedTaak.id)
     
-    // Optimistic update voor snelle visuele feedback
     setTaken(prev => prev.map(t => 
       t.id === draggedTaak.id 
-        ? { ...t, medewerker_id: newMedewerkerId, geplande_datum: newDatum }
+        ? { ...t, medewerker_id: newMedewerkerId, geplande_datum: newDatum, geplande_tijd_start: newTijdStart }
         : t
     ))
 
+    const updates = { 
+      medewerker_id: newMedewerkerId, 
+      geplande_datum: newDatum,
+      geplande_tijd_start: newTijdStart
+    }
     const { error } = await supabase
       .from('taken')
-      .update({ medewerker_id: newMedewerkerId, geplande_datum: newDatum })
+      .update(updates)
       .eq('id', draggedTaak.id)
     
     if (error) {
@@ -193,61 +330,93 @@ export default function Planning() {
     }
     setSavingId(null)
     setDraggedTaak(null)
-  }, [draggedTaak, selectedWeek])
+  }, [draggedTaak, huidigJaar, huidigWeek])
 
   async function bevestigWeek() {
     setBevestigen(true)
-    const [jaar, week] = selectedWeek.split('-').map(Number)
     const { error } = await supabase
       .from('taken')
       .update({ status: 'bevestigd' })
-      .eq('jaar', jaar).eq('weeknummer', week).eq('status', 'concept')
+      .eq('jaar', huidigJaar).eq('weeknummer', huidigWeek).eq('status', 'concept')
     
     if (error) {
       setBericht({type:'error', tekst:'Fout: ' + error.message})
     } else {
-      setBericht({type:'success', tekst:`✓ Week ${week} bevestigd`})
+      setBericht({type:'success', tekst:`✓ Week ${huidigWeek} bevestigd`})
       laadAlles()
       setTimeout(() => setBericht(null), 2500)
     }
     setBevestigen(false)
   }
 
-  if (loading) return <div className="loading">Planning laden…</div>
-
-  if (weken.length === 0) {
-    return (
-      <div className="card">
-        <div className="cb" style={{textAlign:'center', padding:'40px 20px', color:'var(--gray-500)'}}>
-          <div style={{fontSize:32, marginBottom:12, opacity:.5}}>📅</div>
-          <div style={{fontWeight:600, fontSize:14}}>Nog geen taken in de planning</div>
-          <div style={{fontSize:12, marginTop:6}}>Genereer eerst een planning via Auto-planning</div>
-        </div>
-      </div>
-    )
+  function gaNaarWeek(delta) {
+    let nw = huidigWeek + delta
+    let nj = huidigJaar
+    if (nw > 52) { nw = 1; nj += 1 }
+    if (nw < 1) { nw = 52; nj -= 1 }
+    setHuidigWeek(nw)
+    setHuidigJaar(nj)
   }
 
-  const [jaar, week] = selectedWeek ? selectedWeek.split('-').map(Number) : [null, null]
+  function gaNaarDatum(datumStr) {
+    const d = new Date(datumStr)
+    const { year, week } = getISOWeek(d)
+    setHuidigJaar(year)
+    setHuidigWeek(week)
+  }
+
+  if (loading) return <div className="loading">Planning laden…</div>
+
   const conceptTaken = takenInWeek.filter(t => t.status === 'concept').length
   const totaalUren = takenInWeek.reduce((s, t) => s + (t.geplande_minuten || 0), 0) / 60
+  const maandagDatum = huidigWeek ? datumVoorDag(huidigJaar, huidigWeek, 1) : null
+
+  // Slots voor uur-labels (alleen op het hele uur)
+  const uurLabels = []
+  for (let u = START_UUR; u < EIND_UUR; u++) {
+    uurLabels.push({ uur: u, slot: ((u - START_UUR) * 60) / SLOT_MIN })
+  }
 
   return (
     <div>
-      <div className="sr-row" style={{flexWrap:'wrap'}}>
-        {weken.map(w => {
-          const [jr, wk] = w.split('-')
-          const aantal = taken.filter(t => `${t.jaar}-${t.weeknummer}` === w).length
-          return (
-            <button key={w}
-              className={'btn ' + (selectedWeek===w?'bp':'bg') + ' bsm'}
-              onClick={() => setSelectedWeek(w)}>
-              Wk {wk} · {jr} ({aantal})
-            </button>
-          )
-        })}
+      {/* WEEK NAVIGATIE */}
+      <div className="planning-toolbar">
+        <button className="btn bg bsm" onClick={() => gaNaarWeek(-1)} title="Vorige week">◀</button>
+        <div className="week-nav-title">
+          <div style={{fontSize:14, fontWeight:700}}>
+            Week {huidigWeek} · {huidigJaar}
+          </div>
+          {maandagDatum && (
+            <div style={{fontSize:11, color:'var(--gray-500)', marginTop:1}}>
+              {maandagDatum.getDate()} {['januari','februari','maart','april','mei','juni','juli','augustus','september','oktober','november','december'][maandagDatum.getMonth()]}
+            </div>
+          )}
+        </div>
+        <button className="btn bg bsm" onClick={() => gaNaarWeek(1)} title="Volgende week">▶</button>
+        
+        <input
+          ref={datepickerRef}
+          type="date"
+          className="fi"
+          style={{padding:'6px 10px', fontSize:12, marginLeft:6, width:155}}
+          onChange={(e) => e.target.value && gaNaarDatum(e.target.value)}
+          title="Spring naar datum"
+        />
+        <button className="btn bg bsm" onClick={() => { 
+          const today = new Date()
+          const { year, week } = getISOWeek(today)
+          setHuidigJaar(year); setHuidigWeek(week)
+        }}>Vandaag</button>
+        
         <div style={{flex:1}}></div>
+        
+        <div style={{fontSize:12, color:'var(--gray-600)'}}>
+          <strong>{takenInWeek.length}</strong> klussen · <strong>{totaalUren.toFixed(1)}u</strong> · 
+          Bezetting: <strong style={{color: totaalUren/120 > 1 ? 'var(--red)' : 'inherit'}}>{(totaalUren/120*100).toFixed(0)}%</strong>
+        </div>
+
         <button className="btn bp bsm" onClick={bevestigWeek} disabled={bevestigen || conceptTaken === 0}>
-          {bevestigen ? 'Bezig...' : `✓ Week ${week} bevestigen (${conceptTaken})`}
+          {bevestigen ? 'Bezig...' : `✓ Bevestigen (${conceptTaken})`}
         </button>
       </div>
 
@@ -261,7 +430,7 @@ export default function Planning() {
         </div>
       )}
 
-      {/* HOOFDLAYOUT: Pool links, Kalender rechts */}
+      {/* HOOFDLAYOUT: Pool links, Kalender rechts (volledig scherm) */}
       <div className="planning-layout">
         
         {/* POOL ZIJBALK */}
@@ -276,7 +445,7 @@ export default function Planning() {
               <div>
                 <div style={{fontSize:13, fontWeight:700}}>📦 Niet toegewezen</div>
                 <div style={{fontSize:11, color:'var(--gray-400)', marginTop:2}}>
-                  {grid.pool.length} {grid.pool.length === 1 ? 'klus' : 'klussen'} · {(grid.pool.reduce((s,t)=>s+(t.geplande_minuten||0),0)/60).toFixed(1)}u
+                  {pool.length} {pool.length === 1 ? 'klus' : 'klussen'} · {(pool.reduce((s,t)=>s+(t.geplande_minuten||0),0)/60).toFixed(1)}u
                 </div>
               </div>
             </div>
@@ -291,15 +460,14 @@ export default function Planning() {
           <div className="pool-list">
             {poolGefilterd.length === 0 ? (
               <div style={{padding:'20px 14px', textAlign:'center', color:'var(--gray-400)', fontSize:11}}>
-                {grid.pool.length === 0 
-                  ? '✅ Alle taken toegewezen' 
-                  : 'Geen taken gevonden'}
+                {pool.length === 0 ? '✅ Alle taken toegewezen' : 'Geen taken gevonden'}
               </div>
             ) : (
               poolGefilterd.map(t => (
                 <PoolKaart 
                   key={t.id}
                   taak={t}
+                  werkelijkeMin={werkelijkeTijden[t.klant_dienst_id]}
                   isSaving={savingId === t.id}
                   onDragStart={onDragStart}
                   onDragEnd={onDragEnd}
@@ -310,99 +478,84 @@ export default function Planning() {
           </div>
         </div>
 
-        {/* KALENDER */}
-        <div className="planning-grid-wrap">
-          <div className="pg-stats">
-            <span><strong>{takenInWeek.length}</strong> klussen</span>
-            <span style={{marginLeft:14}}><strong>{totaalUren.toFixed(1)}u</strong> gepland</span>
-            <span style={{marginLeft:14}}>Bezetting: <strong style={{color: totaalUren/120 > 1 ? 'var(--red)' : 'inherit'}}>{(totaalUren/120*100).toFixed(0)}%</strong></span>
-            <span style={{marginLeft:14, color:'var(--gray-500)', fontSize:11}}>💡 Sleep een taak vanuit de pool of tussen dagen</span>
-          </div>
-
-          <div className="planning-grid">
-            <div className="pg-header">
-              <div className="pg-cell pg-corner">Medewerker</div>
-              {DAGEN.map(d => {
-                const datum = datumVoorDag(jaar, week, d.key)
-                return (
-                  <div key={d.key} className="pg-cell pg-day-header">
-                    <div style={{fontWeight:700, fontSize:11}}>{d.label}</div>
-                    <div style={{fontSize:10, color:'var(--gray-400)', marginTop:2}}>
-                      {datum.getDate()} {['jan','feb','mrt','apr','mei','jun','jul','aug','sep','okt','nov','dec'][datum.getMonth()]}
+        {/* KALENDER MET TIJDAS */}
+        <div className="kalender-wrap">
+          <div className="kalender-grid">
+            {/* HEADER ROW */}
+            <div className="kg-corner">Tijd</div>
+            {DAGEN.map(d => {
+              const datum = datumVoorDag(huidigJaar, huidigWeek, d.key)
+              const feest = isFeestdag(datum, feestdagen)
+              return (
+                <div key={d.key} className={'kg-day-header' + (feest ? ' is-feest' : '')}>
+                  <div style={{fontWeight:700, fontSize:11}}>{d.label} {datum.getDate()}/{datum.getMonth()+1}</div>
+                  {feest && (
+                    <div style={{fontSize:9, fontWeight:600, marginTop:2, color:'#dc2626'}}>
+                      🎉 {feest.naam}
                     </div>
-                  </div>
-                )
-              })}
+                  )}
+                </div>
+              )
+            })}
+
+            {/* MEDEWERKER NAMEN ROW */}
+            <div className="kg-med-corner">Medewerker</div>
+            {DAGEN.map(d => (
+              <div key={d.key} className="kg-med-row">
+                {medewerkers.map(m => {
+                  const totalen = medewerkerTotaal(m.id)
+                  const initials = m.naam.split(' ').map(n => n[0]).slice(0,2).join('')
+                  // Check belasting voor deze dag specifiek
+                  const dagMin = (grid[m.id]?.[d.key] || []).reduce((s,t) => s + (t.geplande_minuten||0), 0)
+                  return (
+                    <div key={m.id} className="kg-med-block" title={`${m.naam} - dag: ${(dagMin/60).toFixed(1)}u`}>
+                      <div className="av av-blue" style={{background: m.kleur, width:18, height:18, fontSize:8}}>{initials}</div>
+                      <span style={{fontSize:9.5, fontWeight:600}}>{m.naam.split(' ')[0]}</span>
+                      <span style={{fontSize:8.5, color:'var(--gray-500)', marginLeft:'auto'}}>{(dagMin/60).toFixed(1)}u</span>
+                    </div>
+                  )
+                })}
+              </div>
+            ))}
+
+            {/* TIJD ROWS */}
+            <div className="kg-time-col">
+              {uurLabels.map(({uur, slot}) => (
+                <div key={uur} className="kg-time-label" style={{top: slot * SLOT_HOOGTE_PX}}>
+                  {String(uur).padStart(2,'0')}:00
+                </div>
+              ))}
             </div>
 
-            {medewerkers.map(m => {
-              const totalen = medewerkerTotaal(m.id)
-              const initials = m.naam.split(' ').map(n => n[0]).slice(0,2).join('')
+            {DAGEN.map(d => {
+              const datum = datumVoorDag(huidigJaar, huidigWeek, d.key)
+              const feest = isFeestdag(datum, feestdagen)
               return (
-                <div key={m.id} className="pg-row">
-                  <div className="pg-cell pg-med-cell">
-                    <div style={{display:'flex', alignItems:'center', gap:8}}>
-                      <div className="av av-blue" style={{background: m.kleur, width:28, height:28, fontSize:10}}>{initials}</div>
-                      <div>
-                        <div style={{fontWeight:700, fontSize:12}}>{m.naam.split(' ')[0]}</div>
-                        <div style={{fontSize:10, color:'var(--gray-500)'}}>
-                          {totalen.taken} klus · {(totalen.minuten/60).toFixed(1)}u
-                        </div>
-                      </div>
-                    </div>
-                    <div style={{marginTop:6, height:4, background:'var(--gray-100)', borderRadius:2, overflow:'hidden'}}>
-                      <div style={{
-                        width: Math.min((totalen.minuten/60)/40*100, 100) + '%',
-                        height:'100%',
-                        background: m.kleur,
-                        transition:'width .3s'
-                      }}></div>
-                    </div>
-                  </div>
-
-                  {DAGEN.map(d => {
-                    const cellTaken = grid.grid[m.id]?.[d.key] || []
-                    const belastingMin = celBelasting(m.id, d.key)
-                    const dragKey = `${m.id}-${d.key}`
-                    const isDropTarget = dragOver === dragKey
-                    const isOverloaded = belastingMin > 480
-                    return (
-                      <div 
-                        key={d.key} 
-                        className={'pg-cell pg-day-cell' + (isDropTarget ? ' drop-target' : '')}
-                        onDragOver={(e) => onDragOver(e, m.id, d.key)}
-                        onDragLeave={() => setDragOver(null)}
-                        onDrop={(e) => onDrop(e, m.id, d.key)}
-                      >
-                        {cellTaken.length === 0 ? (
-                          <div style={{fontSize:10, color:'var(--gray-300)', textAlign:'center', padding:'14px 4px', minHeight:60, display:'flex', alignItems:'center', justifyContent:'center'}}>
-                            {isDropTarget ? '↓ neerzetten' : '·'}
-                          </div>
-                        ) : (
-                          <>
-                            {cellTaken.map(t => (
-                              <TaakKaart 
-                                key={t.id}
-                                taak={t} 
-                                kleur={m.kleur}
-                                isSaving={savingId === t.id}
-                                isDragging={draggedTaak?.id === t.id}
-                                onDragStart={onDragStart}
-                                onDragEnd={onDragEnd}
-                              />
-                            ))}
-                            <div style={{
-                              marginTop:4, fontSize:9.5, fontWeight:700,
-                              color: isOverloaded ? 'var(--red)' : 'var(--gray-500)',
-                              textAlign:'right'
-                            }}>
-                              {(belastingMin/60).toFixed(1)}u {isOverloaded ? '⚠️' : ''}
-                            </div>
-                          </>
-                        )}
-                      </div>
-                    )
-                  })}
+                <div key={d.key} className={'kg-day-col' + (feest ? ' is-feest' : '')}>
+                  {/* Uur lijnen achtergrond */}
+                  {uurLabels.map(({uur, slot}) => (
+                    <div key={uur} className="kg-hour-line" style={{top: slot * SLOT_HOOGTE_PX}}></div>
+                  ))}
+                  
+                  {/* Medewerker lanen */}
+                  {medewerkers.map((m, mIdx) => (
+                    <MedewerkerLaan
+                      key={m.id}
+                      medewerker={m}
+                      mIdx={mIdx}
+                      totaalMedewerkers={medewerkers.length}
+                      dagKey={d.key}
+                      taken={positiesInDag[m.id]?.[d.key] || []}
+                      onDragStart={onDragStart}
+                      onDragEnd={onDragEnd}
+                      onDragOver={onDragOver}
+                      onDrop={onDrop}
+                      onDragLeave={() => setDragOver(null)}
+                      dragOver={dragOver}
+                      draggedTaak={draggedTaak}
+                      savingId={savingId}
+                    />
+                  ))}
                 </div>
               )
             })}
@@ -411,22 +564,38 @@ export default function Planning() {
       </div>
 
       <style>{`
+        .planning-toolbar {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          background: white;
+          border: 1px solid var(--gray-200);
+          border-radius: 9px;
+          padding: 10px 14px;
+          margin-bottom: 10px;
+          box-shadow: 0 1px 3px rgba(0,0,0,.05);
+        }
+        .week-nav-title {
+          min-width: 130px;
+          text-align: center;
+        }
+        
         .planning-layout {
           display: grid;
           grid-template-columns: 280px 1fr;
-          gap: 14px;
+          gap: 10px;
           align-items: flex-start;
+          /* Volledig scherm: maak hoogte zo groot mogelijk */
+          height: calc(100vh - 180px);
         }
         .planning-pool {
           background: white;
           border: 1px solid var(--gray-200);
           border-radius: 9px;
           box-shadow: 0 1px 3px rgba(0,0,0,.05);
-          max-height: calc(100vh - 220px);
+          height: 100%;
           display: flex;
           flex-direction: column;
-          position: sticky;
-          top: 70px;
           transition: outline .15s;
         }
         .planning-pool.drop-target {
@@ -435,10 +604,11 @@ export default function Planning() {
           background: var(--brand-50);
         }
         .pool-header {
-          padding: 12px 14px;
+          padding: 10px 12px;
           border-bottom: 1px solid var(--gray-100);
           background: var(--gray-50);
           border-radius: 9px 9px 0 0;
+          flex-shrink: 0;
         }
         .pool-list {
           padding: 8px;
@@ -448,70 +618,186 @@ export default function Planning() {
           flex-direction: column;
           gap: 6px;
         }
-        .planning-grid-wrap {
-          min-width: 0;
-        }
-        .pg-stats {
+
+        .kalender-wrap {
+          height: 100%;
           background: white;
           border: 1px solid var(--gray-200);
           border-radius: 9px;
-          padding: 10px 14px;
-          margin-bottom: 10px;
-          font-size: 12px;
-          color: var(--gray-700);
-        }
-        .planning-grid {
-          background: white;
-          border: 1px solid var(--gray-200);
-          border-radius: 9px;
-          overflow: hidden;
           box-shadow: 0 1px 3px rgba(0,0,0,.05);
+          overflow: hidden;
+          display: flex;
+          flex-direction: column;
         }
-        .pg-header, .pg-row {
+        
+        .kalender-grid {
           display: grid;
-          grid-template-columns: 150px repeat(5, 1fr);
+          grid-template-columns: 60px repeat(5, 1fr);
+          grid-template-rows: auto auto 1fr;
+          height: 100%;
+          overflow: auto;
         }
-        .pg-row { border-top: 1px solid var(--gray-100); }
-        .pg-cell {
+        
+        /* Header row: dagen */
+        .kg-corner {
+          grid-column: 1; grid-row: 1;
+          background: var(--gray-100);
           padding: 8px;
-          border-right: 1px solid var(--gray-100);
+          font-size: 10px;
+          font-weight: 700;
+          color: var(--gray-500);
+          text-transform: uppercase;
+          letter-spacing: .5px;
+          border-bottom: 1px solid var(--gray-200);
+          border-right: 1px solid var(--gray-200);
+          position: sticky; top: 0; left: 0; z-index: 30;
+          text-align: center;
+          display: flex; align-items: center; justify-content: center;
         }
-        .pg-cell:last-child { border-right: none; }
-        .pg-corner { background: var(--gray-50); font-weight: 700; font-size: 11px; color: var(--gray-500); text-transform: uppercase; letter-spacing: .5px; display: flex; align-items: center; padding: 12px; }
-        .pg-day-header { background: var(--gray-50); text-align: center; padding: 12px 8px; }
-        .pg-med-cell { background: var(--gray-50); display: flex; flex-direction: column; justify-content: center; padding: 10px 12px; }
-        .pg-day-cell { 
-          transition: background .15s, outline .15s;
-          min-height: 90px; 
-          display: flex; 
-          flex-direction: column; 
+        .kg-day-header {
+          grid-row: 1;
+          background: var(--gray-50);
+          padding: 8px 6px;
+          text-align: center;
+          border-bottom: 1px solid var(--gray-200);
+          border-right: 1px solid var(--gray-100);
+          position: sticky; top: 0; z-index: 20;
+        }
+        .kg-day-header.is-feest {
+          background: #fef2f2;
+        }
+
+        /* Tweede header rij: medewerkers */
+        .kg-med-corner {
+          grid-column: 1; grid-row: 2;
+          background: var(--gray-100);
+          padding: 4px;
+          font-size: 9px;
+          font-weight: 700;
+          color: var(--gray-500);
+          text-transform: uppercase;
+          letter-spacing: .5px;
+          border-bottom: 2px solid var(--gray-300);
+          border-right: 1px solid var(--gray-200);
+          position: sticky; top: 50px; left: 0; z-index: 30;
+          text-align: center;
+          display: flex; align-items: center; justify-content: center;
+        }
+        .kg-med-row {
+          grid-row: 2;
+          background: var(--gray-50);
+          border-bottom: 2px solid var(--gray-300);
+          border-right: 1px solid var(--gray-100);
+          padding: 4px 6px;
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(60px, 1fr));
+          gap: 2px;
+          position: sticky; top: 50px; z-index: 20;
+        }
+        .kg-med-block {
+          display: flex;
+          align-items: center;
           gap: 4px;
+          padding: 3px 5px;
+          background: white;
+          border-radius: 4px;
+          font-size: 10px;
+        }
+
+        /* Tijdkolom links */
+        .kg-time-col {
+          grid-column: 1; grid-row: 3;
+          background: var(--gray-50);
+          border-right: 1px solid var(--gray-200);
+          position: sticky; left: 0; z-index: 10;
+          height: ${TOTAAL_SLOTS * SLOT_HOOGTE_PX}px;
           position: relative;
         }
-        .pg-day-cell.drop-target { 
-          background: var(--brand-50); 
-          outline: 3px dashed var(--brand-light); 
-          outline-offset: -3px;
+        .kg-time-label {
+          position: absolute;
+          left: 0; right: 0;
+          font-size: 10px;
+          font-weight: 600;
+          color: var(--gray-500);
+          padding: 2px 6px;
+          background: var(--gray-50);
+          border-top: 1px solid var(--gray-200);
         }
-        .taak-kaart {
-          padding: 6px 8px;
-          border-radius: 5px;
-          font-size: 10.5px;
-          line-height: 1.3;
-          cursor: grab;
-          color: white;
-          user-select: none;
-          transition: opacity .15s, transform .15s, box-shadow .15s;
-          border-left: 3px solid rgba(0,0,0,.2);
+
+        /* Dag kolom in tijd-grid */
+        .kg-day-col {
+          grid-row: 3;
+          position: relative;
+          border-right: 1px solid var(--gray-100);
+          height: ${TOTAAL_SLOTS * SLOT_HOOGTE_PX}px;
+          display: flex;
         }
-        .taak-kaart:hover { transform: translateY(-1px); box-shadow: 0 2px 6px rgba(0,0,0,.15); }
-        .taak-kaart:active { cursor: grabbing; }
-        .taak-kaart.saving { opacity: .4; pointer-events: none; }
-        .taak-kaart.dragging { opacity: .3; }
-        .tk-naam { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .tk-meta { opacity: .85; font-size: 9.5px; margin-top: 1px; }
-        .tk-instr { background: rgba(255,255,255,.2); padding: 2px 5px; border-radius: 3px; font-size: 9px; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .kg-day-col.is-feest {
+          background: repeating-linear-gradient(
+            45deg,
+            #f3f4f6,
+            #f3f4f6 8px,
+            #e5e7eb 8px,
+            #e5e7eb 16px
+          );
+        }
+        .kg-hour-line {
+          position: absolute;
+          left: 0; right: 0;
+          height: 1px;
+          background: var(--gray-200);
+          pointer-events: none;
+        }
         
+        /* Medewerker laan binnen een dag */
+        .med-laan {
+          flex: 1;
+          position: relative;
+          border-right: 1px dashed var(--gray-100);
+          min-width: 0;
+        }
+        .med-laan:last-child {
+          border-right: none;
+        }
+        .med-laan-dropzone {
+          position: absolute;
+          inset: 0;
+        }
+        .med-laan.drop-target {
+          background: rgba(37, 99, 235, 0.08);
+          outline: 2px dashed var(--brand-light);
+          outline-offset: -2px;
+        }
+        
+        /* Tijd-blokje */
+        .tijd-blok {
+          position: absolute;
+          left: 1px; right: 1px;
+          padding: 3px 5px;
+          border-radius: 4px;
+          font-size: 9.5px;
+          line-height: 1.2;
+          color: white;
+          cursor: grab;
+          user-select: none;
+          overflow: hidden;
+          z-index: 2;
+          box-shadow: 0 1px 3px rgba(0,0,0,.15);
+          transition: transform .1s, opacity .15s;
+        }
+        .tijd-blok:hover {
+          transform: scale(1.02);
+          z-index: 5;
+          box-shadow: 0 2px 8px rgba(0,0,0,.25);
+        }
+        .tijd-blok:active { cursor: grabbing; }
+        .tijd-blok.saving { opacity: .4; pointer-events: none; }
+        .tijd-blok.dragging { opacity: .3; }
+        .tb-naam { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 10px; }
+        .tb-meta { opacity: .9; font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+        .tb-instr { font-size: 8.5px; background: rgba(0,0,0,.15); padding: 1px 3px; border-radius: 2px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        
+        /* Pool kaart */
         .pool-kaart {
           padding: 8px 10px;
           background: white;
@@ -534,68 +820,124 @@ export default function Planning() {
         .pool-kaart.saving { opacity: .4; pointer-events: none; }
         .pool-kaart.dragging { opacity: .3; }
         .pk-naam { font-weight: 700; color: var(--gray-900); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .pk-meta { color: var(--gray-500); font-size: 10px; margin-top: 2px; }
+        .pk-dienst { color: var(--brand); font-weight: 600; font-size: 10px; margin-top: 2px; }
+        .pk-adres { color: var(--gray-500); font-size: 10px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .pk-tags { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
         .pk-tag { font-size: 9px; padding: 1px 6px; border-radius: 10px; font-weight: 600; }
         .pk-tag-tijd { background: var(--gray-100); color: var(--gray-600); }
-        .pk-tag-prijs { background: var(--green-50); color: var(--green); }
-        .pk-tag-instr { background: var(--accent-50); color: #92400e; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .pk-tag-werkelijk { background: var(--purple-50); color: var(--purple); }
+        .pk-tag-instr { background: var(--accent-50); color: #92400e; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
         @media (max-width: 1100px) {
-          .planning-layout { grid-template-columns: 1fr; }
-          .planning-pool { position: static; max-height: 400px; }
+          .planning-layout { grid-template-columns: 1fr; height: auto; }
+          .planning-pool { height: auto; max-height: 400px; }
+          .kalender-wrap { height: 600px; }
         }
       `}</style>
     </div>
   )
 }
 
-function TaakKaart({ taak, kleur, isSaving, isDragging, onDragStart, onDragEnd }) {
-  const tijd = taak.geplande_minuten >= 60
+function MedewerkerLaan({ medewerker, mIdx, totaalMedewerkers, dagKey, taken, onDragStart, onDragEnd, onDragOver, onDrop, onDragLeave, dragOver, draggedTaak, savingId }) {
+  // Genereer slot-cellen voor drop targets (per kwartier)
+  const dropZones = []
+  for (let s = 0; s < TOTAAL_SLOTS; s++) {
+    const dragKey = `${medewerker.id}-${dagKey}-${s}`
+    dropZones.push(
+      <div
+        key={s}
+        style={{
+          position:'absolute',
+          left:0, right:0,
+          top: s * SLOT_HOOGTE_PX,
+          height: SLOT_HOOGTE_PX,
+          background: dragOver === dragKey ? 'rgba(37,99,235,.15)' : 'transparent',
+          borderTop: dragOver === dragKey ? '2px solid var(--brand-light)' : 'none',
+          zIndex: 1,
+        }}
+        onDragOver={(e) => onDragOver(e, medewerker.id, dagKey, s)}
+        onDragLeave={onDragLeave}
+        onDrop={(e) => onDrop(e, medewerker.id, dagKey, s)}
+      />
+    )
+  }
+  
+  return (
+    <div className="med-laan">
+      <div className="med-laan-dropzone">
+        {dropZones}
+        {taken.map(({taak, slotStart, slotLengte}) => (
+          <TijdBlok
+            key={taak.id}
+            taak={taak}
+            kleur={medewerker.kleur}
+            top={slotStart * SLOT_HOOGTE_PX}
+            height={slotLengte * SLOT_HOOGTE_PX - 1}
+            isSaving={savingId === taak.id}
+            isDragging={draggedTaak?.id === taak.id}
+            onDragStart={onDragStart}
+            onDragEnd={onDragEnd}
+          />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function TijdBlok({ taak, kleur, top, height, isSaving, isDragging, onDragStart, onDragEnd }) {
+  const tijd = taak.geplande_tijd_start || ''
+  const compactTijd = taak.geplande_minuten >= 60
     ? `${Math.floor(taak.geplande_minuten/60)}u${taak.geplande_minuten%60 ? (taak.geplande_minuten%60)+'m' : ''}`
     : `${taak.geplande_minuten}m`
   return (
     <div 
-      className={'taak-kaart' + (isSaving ? ' saving' : '') + (isDragging ? ' dragging' : '')}
+      className={'tijd-blok' + (isSaving ? ' saving' : '') + (isDragging ? ' dragging' : '')}
       draggable={!isSaving}
       onDragStart={(e) => onDragStart(e, taak)}
       onDragEnd={onDragEnd}
       style={{
+        top, height: Math.max(height, 18),
         background: kleur,
         opacity: taak.status === 'bevestigd' ? 1 : 0.85,
       }}
-      title={`${taak.klant?.naam} — ${taak.dienst?.naam}\n${taak.bijzondere_instructie || ''}`}
+      title={`${tijd} · ${taak.klant?.naam} — ${taak.dienst?.naam} (${compactTijd})\n${taak.klant?.adres || ''}\n${taak.bijzondere_instructie || ''}`}
     >
-      <div className="tk-naam">{taak.klant?.naam || 'Onbekend'}</div>
-      <div className="tk-meta">{taak.dienst?.naam} · {tijd} · €{parseFloat(taak.vaste_prijs||0).toFixed(0)}</div>
-      {taak.bijzondere_instructie && (
-        <div className="tk-instr">⚠️ {taak.bijzondere_instructie}</div>
+      <div className="tb-naam">{tijd && <span style={{opacity:.85}}>{tijd} </span>}{taak.klant?.naam || 'Onbekend'}</div>
+      {height >= 28 && <div className="tb-meta">{taak.dienst?.naam} · {compactTijd}</div>}
+      {height >= 56 && taak.bijzondere_instructie && (
+        <div className="tb-instr">⚠️ {taak.bijzondere_instructie}</div>
       )}
     </div>
   )
 }
 
-function PoolKaart({ taak, isSaving, isDragging, onDragStart, onDragEnd }) {
+function PoolKaart({ taak, werkelijkeMin, isSaving, isDragging, onDragStart, onDragEnd }) {
   const tijd = taak.geplande_minuten >= 60
     ? `${Math.floor(taak.geplande_minuten/60)}u${taak.geplande_minuten%60 ? (taak.geplande_minuten%60)+'m' : ''}`
     : `${taak.geplande_minuten}m`
+  const werkelijkTijd = werkelijkeMin
+    ? (werkelijkeMin >= 60 ? `${Math.floor(werkelijkeMin/60)}u${werkelijkeMin%60 ? (werkelijkeMin%60)+'m' : ''}` : `${werkelijkeMin}m`)
+    : null
   return (
     <div 
       className={'pool-kaart' + (isSaving ? ' saving' : '') + (isDragging ? ' dragging' : '')}
       draggable={!isSaving}
       onDragStart={(e) => onDragStart(e, taak)}
       onDragEnd={onDragEnd}
-      title={`${taak.klant?.naam}\n${taak.dienst?.naam}\n${taak.bijzondere_instructie || ''}`}
+      title={`${taak.klant?.naam}\n${taak.dienst?.naam}\n${taak.klant?.adres || ''}\n${taak.bijzondere_instructie || ''}`}
     >
       <div className="pk-naam">{taak.klant?.naam || 'Onbekend'}</div>
-      <div className="pk-meta">
-        {taak.dienst?.naam}{taak.klant?.regio ? ` · ${taak.klant.regio}` : ''}
-      </div>
+      <div className="pk-dienst">{taak.dienst?.naam}</div>
+      <div className="pk-adres">📍 {taak.klant?.adres || taak.klant?.regio || '—'}</div>
       <div className="pk-tags">
-        <span className="pk-tag pk-tag-tijd">{tijd}</span>
-        <span className="pk-tag pk-tag-prijs">€{parseFloat(taak.vaste_prijs||0).toFixed(0)}</span>
+        <span className="pk-tag pk-tag-tijd" title="Geplande tijd">⏱️ {tijd}</span>
+        {werkelijkTijd && (
+          <span className="pk-tag pk-tag-werkelijk" title="Gemiddelde werkelijke tijd (laatste 3x)">
+            📊 {werkelijkTijd}
+          </span>
+        )}
         {taak.bijzondere_instructie && (
-          <span className="pk-tag pk-tag-instr">⚠️ {taak.bijzondere_instructie.slice(0, 40)}</span>
+          <span className="pk-tag pk-tag-instr">⚠️ {taak.bijzondere_instructie.slice(0, 35)}</span>
         )}
       </div>
     </div>
