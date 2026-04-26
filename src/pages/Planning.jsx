@@ -19,6 +19,7 @@ export default function Planning() {
   const [savingId, setSavingId] = useState(null)
   const [bevestigen, setBevestigen] = useState(false)
   const [bericht, setBericht] = useState(null)
+  const [poolZoek, setPoolZoek] = useState('')
 
   useEffect(() => { laadAlles() }, [])
 
@@ -52,9 +53,7 @@ export default function Planning() {
     return taken.filter(t => t.jaar === jaar && t.weeknummer === week)
   }, [taken, selectedWeek])
 
-  // Bereken datum van een dag in de week
   function datumVoorDag(jaar, week, dagNr) {
-    // ISO week → datum
     const jan4 = new Date(jaar, 0, 4)
     const dayOfWeek = jan4.getDay() || 7
     const week1Monday = new Date(jan4)
@@ -66,70 +65,61 @@ export default function Planning() {
     return target
   }
 
-  // Groepeer taken per medewerker × dag
+  // Wat zit waar?
   const grid = useMemo(() => {
-    if (!selectedWeek) return {}
-    const [jaar, week] = selectedWeek.split('-').map(Number)
     const result = {}
-    
-    // Init lege cellen
     medewerkers.forEach(m => {
       result[m.id] = {}
-      DAGEN.forEach(d => {
-        result[m.id][d.key] = []
-      })
+      DAGEN.forEach(d => { result[m.id][d.key] = [] })
     })
-    result['unassigned'] = {}
-    DAGEN.forEach(d => {
-      result['unassigned'][d.key] = []
-    })
+    
+    const pool = []  // Niet-toegewezen of geen dag = pool
 
-    // Vul met taken
     takenInWeek.forEach(t => {
-      const medKey = t.medewerker_id || 'unassigned'
       let dagNr = null
       if (t.geplande_datum) {
         const d = new Date(t.geplande_datum)
         dagNr = d.getDay() === 0 ? 7 : d.getDay()
-        if (dagNr > 5) dagNr = null  // Geen weekend
+        if (dagNr > 5) dagNr = null
       }
       
-      if (dagNr === null) {
-        // Niet ingedeeld in een dag
-        if (!result[medKey]['unassigned']) result[medKey]['unassigned'] = []
-        result[medKey]['unassigned'].push(t)
+      const heeftMedewerker = !!t.medewerker_id
+      const heeftDag = dagNr !== null
+      
+      if (heeftMedewerker && heeftDag && result[t.medewerker_id]) {
+        result[t.medewerker_id][dagNr].push(t)
       } else {
-        if (!result[medKey][dagNr]) result[medKey][dagNr] = []
-        result[medKey][dagNr].push(t)
+        pool.push(t)
       }
     })
     
-    return result
-  }, [takenInWeek, medewerkers, selectedWeek])
+    return { grid: result, pool }
+  }, [takenInWeek, medewerkers])
 
-  // Bereken belasting per cel
+  const poolGefilterd = useMemo(() => {
+    if (!poolZoek) return grid.pool
+    const z = poolZoek.toLowerCase()
+    return grid.pool.filter(t => 
+      (t.klant?.naam || '').toLowerCase().includes(z) ||
+      (t.klant?.regio || '').toLowerCase().includes(z) ||
+      (t.dienst?.naam || '').toLowerCase().includes(z)
+    )
+  }, [grid.pool, poolZoek])
+
   function celBelasting(medId, dagKey) {
-    const cellTaken = grid[medId]?.[dagKey] || []
+    const cellTaken = grid.grid[medId]?.[dagKey] || []
     return cellTaken.reduce((s, t) => s + (t.geplande_minuten || 0), 0)
   }
 
-  // Bereken totaal per medewerker
   function medewerkerTotaal(medId) {
     let totaalMin = 0, aantalTaken = 0, omzet = 0
     DAGEN.forEach(d => {
-      const cellTaken = grid[medId]?.[d.key] || []
+      const cellTaken = grid.grid[medId]?.[d.key] || []
       cellTaken.forEach(t => {
         totaalMin += t.geplande_minuten || 0
         aantalTaken += 1
         omzet += parseFloat(t.vaste_prijs || 0)
       })
-    })
-    // Niet-ingedeelde taken voor deze medewerker
-    const unassignedTaken = grid[medId]?.['unassigned'] || []
-    unassignedTaken.forEach(t => {
-      totaalMin += t.geplande_minuten || 0
-      aantalTaken += 1
-      omzet += parseFloat(t.vaste_prijs || 0)
     })
     return { minuten: totaalMin, taken: aantalTaken, omzet }
   }
@@ -139,6 +129,20 @@ export default function Planning() {
     setDraggedTaak(taak)
     e.dataTransfer.effectAllowed = 'move'
     e.dataTransfer.setData('text/plain', taak.id)
+    
+    // Maak een mooi sleep-image
+    const dragImage = document.createElement('div')
+    dragImage.style.cssText = `
+      position: absolute; top: -1000px; left: -1000px;
+      padding: 8px 12px; background: #1e4a8a; color: white;
+      border-radius: 6px; font-size: 12px; font-weight: 600;
+      box-shadow: 0 4px 12px rgba(0,0,0,.3);
+      font-family: 'Sora', sans-serif;
+    `
+    dragImage.textContent = `${taak.klant?.naam || 'Taak'} (${taak.geplande_minuten}m)`
+    document.body.appendChild(dragImage)
+    e.dataTransfer.setDragImage(dragImage, 10, 10)
+    setTimeout(() => document.body.removeChild(dragImage), 0)
   }, [])
 
   const onDragEnd = useCallback(() => {
@@ -159,27 +163,16 @@ export default function Planning() {
     if (!draggedTaak) return
 
     const [jaar, week] = selectedWeek.split('-').map(Number)
-    const newMedewerkerId = medId === 'unassigned' ? null : medId
+    const newMedewerkerId = medId === 'pool' ? null : medId
     let newDatum = null
-    if (dagKey !== 'unassigned') {
+    if (medId !== 'pool' && dagKey !== null) {
       const d = datumVoorDag(jaar, week, dagKey)
       newDatum = d.toISOString().slice(0, 10)
     }
 
-    // Check of er echt iets verandert
-    const huidigDagKey = (() => {
-      if (!draggedTaak.geplande_datum) return 'unassigned'
-      const d = new Date(draggedTaak.geplande_datum)
-      const dn = d.getDay() === 0 ? 7 : d.getDay()
-      return dn > 5 ? 'unassigned' : dn
-    })()
-    if (draggedTaak.medewerker_id === newMedewerkerId && huidigDagKey === dagKey) {
-      setDraggedTaak(null)
-      return
-    }
-
-    // Optimistic update
     setSavingId(draggedTaak.id)
+    
+    // Optimistic update voor snelle visuele feedback
     setTaken(prev => prev.map(t => 
       t.id === draggedTaak.id 
         ? { ...t, medewerker_id: newMedewerkerId, geplande_datum: newDatum }
@@ -193,26 +186,22 @@ export default function Planning() {
     
     if (error) {
       setBericht({type:'error', tekst:'Kon niet opslaan: ' + error.message})
-      // Revert
       laadAlles()
     } else {
       setBericht({type:'success', tekst:'✓ Taak verplaatst en opgeslagen'})
-      setTimeout(() => setBericht(null), 2500)
+      setTimeout(() => setBericht(null), 2000)
     }
     setSavingId(null)
     setDraggedTaak(null)
   }, [draggedTaak, selectedWeek])
 
-  // Bevestig week
   async function bevestigWeek() {
     setBevestigen(true)
     const [jaar, week] = selectedWeek.split('-').map(Number)
     const { error } = await supabase
       .from('taken')
       .update({ status: 'bevestigd' })
-      .eq('jaar', jaar)
-      .eq('weeknummer', week)
-      .eq('status', 'concept')
+      .eq('jaar', jaar).eq('weeknummer', week).eq('status', 'concept')
     
     if (error) {
       setBericht({type:'error', tekst:'Fout: ' + error.message})
@@ -239,10 +228,8 @@ export default function Planning() {
   }
 
   const [jaar, week] = selectedWeek ? selectedWeek.split('-').map(Number) : [null, null]
-  const totaalKlussen = takenInWeek.length
-  const totaalUren = takenInWeek.reduce((s, t) => s + (t.geplande_minuten || 0), 0) / 60
-  const totaalOmzet = takenInWeek.reduce((s, t) => s + parseFloat(t.vaste_prijs || 0), 0)
   const conceptTaken = takenInWeek.filter(t => t.status === 'concept').length
+  const totaalUren = takenInWeek.reduce((s, t) => s + (t.geplande_minuten || 0), 0) / 60
 
   return (
     <div>
@@ -251,48 +238,22 @@ export default function Planning() {
           const [jr, wk] = w.split('-')
           const aantal = taken.filter(t => `${t.jaar}-${t.weeknummer}` === w).length
           return (
-            <button
-              key={w}
+            <button key={w}
               className={'btn ' + (selectedWeek===w?'bp':'bg') + ' bsm'}
               onClick={() => setSelectedWeek(w)}>
               Wk {wk} · {jr} ({aantal})
             </button>
           )
         })}
-      </div>
-
-      <div className="sg s4" style={{marginBottom:14}}>
-        <div className="stat sb1">
-          <div className="sl">Totaal klussen</div>
-          <div className="sv">{totaalKlussen}</div>
-          <div className="sd">in week {week}</div>
-        </div>
-        <div className="stat sa1">
-          <div className="sl">Geplande uren</div>
-          <div className="sv">{totaalUren.toFixed(1)}u</div>
-          <div className="sd">{(totaalUren/120*100).toFixed(0)}% van capaciteit</div>
-        </div>
-        <div className="stat sg1">
-          <div className="sl">Prognose omzet</div>
-          <div className="sv">€{totaalOmzet.toLocaleString('nl-NL', {maximumFractionDigits:0})}</div>
-          <div className="sd">{conceptTaken} concept</div>
-        </div>
-        <div className="stat sr1">
-          <div className="sl">Acties</div>
-          <button 
-            className="btn bp bsm" 
-            style={{marginTop:8, width:'100%', justifyContent:'center'}}
-            onClick={bevestigWeek}
-            disabled={bevestigen || conceptTaken === 0}
-          >
-            {bevestigen ? 'Bezig...' : `✓ Week ${week} bevestigen`}
-          </button>
-        </div>
+        <div style={{flex:1}}></div>
+        <button className="btn bp bsm" onClick={bevestigWeek} disabled={bevestigen || conceptTaken === 0}>
+          {bevestigen ? 'Bezig...' : `✓ Week ${week} bevestigen (${conceptTaken})`}
+        </button>
       </div>
 
       {bericht && (
         <div style={{
-          padding:'10px 14px', borderRadius:7, fontSize:12.5, fontWeight:600, marginBottom:14,
+          padding:'8px 14px', borderRadius:7, fontSize:12.5, fontWeight:600, marginBottom:10,
           background: bericht.type === 'success' ? 'var(--green-50)' : 'var(--red-50)',
           color: bericht.type === 'success' ? 'var(--green)' : 'var(--red)'
         }}>
@@ -300,177 +261,205 @@ export default function Planning() {
         </div>
       )}
 
-      <div className="card" style={{marginBottom:14, padding:'10px 14px', fontSize:11.5, color:'var(--gray-600)', display:'flex', alignItems:'center', gap:8}}>
-        <span style={{fontSize:14}}>💡</span>
-        <span><strong>Tip:</strong> Sleep een taak naar een andere dag of medewerker om de planning aan te passen. Wijzigingen worden direct opgeslagen.</span>
-      </div>
-
-      {/* GRID */}
-      <div className="planning-grid">
-        <div className="pg-header">
-          <div className="pg-cell pg-corner">Medewerker</div>
-          {DAGEN.map(d => {
-            const datum = datumVoorDag(jaar, week, d.key)
-            return (
-              <div key={d.key} className="pg-cell pg-day-header">
-                <div style={{fontWeight:700, fontSize:11}}>{d.label}</div>
-                <div style={{fontSize:10, color:'var(--gray-400)', marginTop:2}}>
-                  {datum.getDate()} {['jan','feb','mrt','apr','mei','jun','jul','aug','sep','okt','nov','dec'][datum.getMonth()]}
+      {/* HOOFDLAYOUT: Pool links, Kalender rechts */}
+      <div className="planning-layout">
+        
+        {/* POOL ZIJBALK */}
+        <div 
+          className={'planning-pool' + (dragOver === 'pool-pool' ? ' drop-target' : '')}
+          onDragOver={(e) => onDragOver(e, 'pool', 'pool')}
+          onDragLeave={() => setDragOver(null)}
+          onDrop={(e) => onDrop(e, 'pool', null)}
+        >
+          <div className="pool-header">
+            <div style={{display:'flex', alignItems:'center', justifyContent:'space-between'}}>
+              <div>
+                <div style={{fontSize:13, fontWeight:700}}>📦 Niet toegewezen</div>
+                <div style={{fontSize:11, color:'var(--gray-400)', marginTop:2}}>
+                  {grid.pool.length} {grid.pool.length === 1 ? 'klus' : 'klussen'} · {(grid.pool.reduce((s,t)=>s+(t.geplande_minuten||0),0)/60).toFixed(1)}u
                 </div>
               </div>
-            )
-          })}
+            </div>
+            <input
+              className="fi"
+              style={{marginTop:8, padding:'6px 10px', fontSize:11.5}}
+              placeholder="🔍 Zoek in pool…"
+              value={poolZoek}
+              onChange={e => setPoolZoek(e.target.value)}
+            />
+          </div>
+          <div className="pool-list">
+            {poolGefilterd.length === 0 ? (
+              <div style={{padding:'20px 14px', textAlign:'center', color:'var(--gray-400)', fontSize:11}}>
+                {grid.pool.length === 0 
+                  ? '✅ Alle taken toegewezen' 
+                  : 'Geen taken gevonden'}
+              </div>
+            ) : (
+              poolGefilterd.map(t => (
+                <PoolKaart 
+                  key={t.id}
+                  taak={t}
+                  isSaving={savingId === t.id}
+                  onDragStart={onDragStart}
+                  onDragEnd={onDragEnd}
+                  isDragging={draggedTaak?.id === t.id}
+                />
+              ))
+            )}
+          </div>
         </div>
 
-        {medewerkers.map(m => {
-          const totalen = medewerkerTotaal(m.id)
-          const initials = m.naam.split(' ').map(n => n[0]).slice(0,2).join('')
-          return (
-            <div key={m.id} className="pg-row">
-              <div className="pg-cell pg-med-cell">
-                <div style={{display:'flex', alignItems:'center', gap:8}}>
-                  <div className="av av-blue" style={{background: m.kleur, width:28, height:28, fontSize:10}}>{initials}</div>
-                  <div>
-                    <div style={{fontWeight:700, fontSize:12}}>{m.naam.split(' ')[0]}</div>
-                    <div style={{fontSize:10, color:'var(--gray-500)'}}>
-                      {totalen.taken} klus · {(totalen.minuten/60).toFixed(1)}u
+        {/* KALENDER */}
+        <div className="planning-grid-wrap">
+          <div className="pg-stats">
+            <span><strong>{takenInWeek.length}</strong> klussen</span>
+            <span style={{marginLeft:14}}><strong>{totaalUren.toFixed(1)}u</strong> gepland</span>
+            <span style={{marginLeft:14}}>Bezetting: <strong style={{color: totaalUren/120 > 1 ? 'var(--red)' : 'inherit'}}>{(totaalUren/120*100).toFixed(0)}%</strong></span>
+            <span style={{marginLeft:14, color:'var(--gray-500)', fontSize:11}}>💡 Sleep een taak vanuit de pool of tussen dagen</span>
+          </div>
+
+          <div className="planning-grid">
+            <div className="pg-header">
+              <div className="pg-cell pg-corner">Medewerker</div>
+              {DAGEN.map(d => {
+                const datum = datumVoorDag(jaar, week, d.key)
+                return (
+                  <div key={d.key} className="pg-cell pg-day-header">
+                    <div style={{fontWeight:700, fontSize:11}}>{d.label}</div>
+                    <div style={{fontSize:10, color:'var(--gray-400)', marginTop:2}}>
+                      {datum.getDate()} {['jan','feb','mrt','apr','mei','jun','jul','aug','sep','okt','nov','dec'][datum.getMonth()]}
                     </div>
                   </div>
-                </div>
-                <div style={{marginTop:6, height:4, background:'var(--gray-100)', borderRadius:2, overflow:'hidden'}}>
-                  <div style={{
-                    width: Math.min((totalen.minuten/60)/40*100, 100) + '%',
-                    height:'100%',
-                    background: m.kleur
-                  }}></div>
-                </div>
-              </div>
-
-              {DAGEN.map(d => {
-                const cellTaken = grid[m.id]?.[d.key] || []
-                const belastingMin = celBelasting(m.id, d.key)
-                const dragKey = `${m.id}-${d.key}`
-                const isDropTarget = dragOver === dragKey
-                const isOverloaded = belastingMin > 480 // > 8 uur
-                return (
-                  <div 
-                    key={d.key} 
-                    className={'pg-cell pg-day-cell' + (isDropTarget ? ' pg-drop-target' : '')}
-                    onDragOver={(e) => onDragOver(e, m.id, d.key)}
-                    onDragLeave={() => setDragOver(null)}
-                    onDrop={(e) => onDrop(e, m.id, d.key)}
-                  >
-                    {cellTaken.length === 0 ? (
-                      <div style={{fontSize:10, color:'var(--gray-300)', textAlign:'center', padding:'14px 4px'}}>
-                        {isDropTarget ? '↓ neerzetten' : ''}
-                      </div>
-                    ) : (
-                      <>
-                        {cellTaken.map(t => (
-                          <TaakKaart 
-                            key={t.id}
-                            taak={t} 
-                            kleur={m.kleur}
-                            isSaving={savingId === t.id}
-                            onDragStart={onDragStart}
-                            onDragEnd={onDragEnd}
-                          />
-                        ))}
-                        <div style={{
-                          marginTop:4, fontSize:9.5, fontWeight:700,
-                          color: isOverloaded ? 'var(--red)' : 'var(--gray-500)',
-                          textAlign:'right'
-                        }}>
-                          {(belastingMin/60).toFixed(1)}u {isOverloaded ? '⚠️' : ''}
-                        </div>
-                      </>
-                    )}
-                  </div>
                 )
               })}
             </div>
-          )
-        })}
 
-        {/* Niet-toegewezen rij */}
-        <div className="pg-row pg-row-unassigned">
-          <div className="pg-cell pg-med-cell">
-            <div style={{display:'flex', alignItems:'center', gap:8}}>
-              <div className="av av-blue" style={{background:'var(--gray-400)', width:28, height:28, fontSize:10}}>?</div>
-              <div>
-                <div style={{fontWeight:700, fontSize:12}}>Niet toegewezen</div>
-                <div style={{fontSize:10, color:'var(--gray-500)'}}>
-                  {(grid['unassigned']?.unassigned || []).length + DAGEN.reduce((s,d) => s + (grid['unassigned']?.[d.key] || []).length, 0)} klussen
-                </div>
-              </div>
-            </div>
-          </div>
-          {DAGEN.map(d => {
-            const cellTaken = grid['unassigned']?.[d.key] || []
-            const dragKey = `unassigned-${d.key}`
-            const isDropTarget = dragOver === dragKey
-            return (
-              <div 
-                key={d.key} 
-                className={'pg-cell pg-day-cell' + (isDropTarget ? ' pg-drop-target' : '')}
-                onDragOver={(e) => onDragOver(e, 'unassigned', d.key)}
-                onDragLeave={() => setDragOver(null)}
-                onDrop={(e) => onDrop(e, 'unassigned', d.key)}
-              >
-                {cellTaken.length === 0 ? (
-                  <div style={{fontSize:10, color:'var(--gray-300)', textAlign:'center', padding:'14px 4px'}}>
-                    {isDropTarget ? '↓ neerzetten' : ''}
+            {medewerkers.map(m => {
+              const totalen = medewerkerTotaal(m.id)
+              const initials = m.naam.split(' ').map(n => n[0]).slice(0,2).join('')
+              return (
+                <div key={m.id} className="pg-row">
+                  <div className="pg-cell pg-med-cell">
+                    <div style={{display:'flex', alignItems:'center', gap:8}}>
+                      <div className="av av-blue" style={{background: m.kleur, width:28, height:28, fontSize:10}}>{initials}</div>
+                      <div>
+                        <div style={{fontWeight:700, fontSize:12}}>{m.naam.split(' ')[0]}</div>
+                        <div style={{fontSize:10, color:'var(--gray-500)'}}>
+                          {totalen.taken} klus · {(totalen.minuten/60).toFixed(1)}u
+                        </div>
+                      </div>
+                    </div>
+                    <div style={{marginTop:6, height:4, background:'var(--gray-100)', borderRadius:2, overflow:'hidden'}}>
+                      <div style={{
+                        width: Math.min((totalen.minuten/60)/40*100, 100) + '%',
+                        height:'100%',
+                        background: m.kleur,
+                        transition:'width .3s'
+                      }}></div>
+                    </div>
                   </div>
-                ) : cellTaken.map(t => (
-                  <TaakKaart 
-                    key={t.id}
-                    taak={t}
-                    kleur="var(--gray-400)"
-                    isSaving={savingId === t.id}
-                    onDragStart={onDragStart}
-                    onDragEnd={onDragEnd}
-                  />
-                ))}
-              </div>
-            )
-          })}
+
+                  {DAGEN.map(d => {
+                    const cellTaken = grid.grid[m.id]?.[d.key] || []
+                    const belastingMin = celBelasting(m.id, d.key)
+                    const dragKey = `${m.id}-${d.key}`
+                    const isDropTarget = dragOver === dragKey
+                    const isOverloaded = belastingMin > 480
+                    return (
+                      <div 
+                        key={d.key} 
+                        className={'pg-cell pg-day-cell' + (isDropTarget ? ' drop-target' : '')}
+                        onDragOver={(e) => onDragOver(e, m.id, d.key)}
+                        onDragLeave={() => setDragOver(null)}
+                        onDrop={(e) => onDrop(e, m.id, d.key)}
+                      >
+                        {cellTaken.length === 0 ? (
+                          <div style={{fontSize:10, color:'var(--gray-300)', textAlign:'center', padding:'14px 4px', minHeight:60, display:'flex', alignItems:'center', justifyContent:'center'}}>
+                            {isDropTarget ? '↓ neerzetten' : '·'}
+                          </div>
+                        ) : (
+                          <>
+                            {cellTaken.map(t => (
+                              <TaakKaart 
+                                key={t.id}
+                                taak={t} 
+                                kleur={m.kleur}
+                                isSaving={savingId === t.id}
+                                isDragging={draggedTaak?.id === t.id}
+                                onDragStart={onDragStart}
+                                onDragEnd={onDragEnd}
+                              />
+                            ))}
+                            <div style={{
+                              marginTop:4, fontSize:9.5, fontWeight:700,
+                              color: isOverloaded ? 'var(--red)' : 'var(--gray-500)',
+                              textAlign:'right'
+                            }}>
+                              {(belastingMin/60).toFixed(1)}u {isOverloaded ? '⚠️' : ''}
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )
+            })}
+          </div>
         </div>
       </div>
 
-      {/* POOL: Taken zonder dag (per medewerker) en niet-toegewezen */}
-      {(() => {
-        const allUnassigned = []
-        Object.keys(grid).forEach(medId => {
-          (grid[medId]?.unassigned || []).forEach(t => allUnassigned.push({ taak: t, medId }))
-        })
-        if (allUnassigned.length === 0) return null
-        return (
-          <div className="card" style={{marginTop:14}}>
-            <div className="ch">
-              <div className="ct">📦 Pool: taken zonder dag-toewijzing ({allUnassigned.length})</div>
-              <div style={{fontSize:11, color:'var(--gray-400)'}}>Sleep ze naar een dag in de kalender hierboven</div>
-            </div>
-            <div className="cb" style={{display:'flex', flexWrap:'wrap', gap:8}}>
-              {allUnassigned.map(({taak, medId}) => {
-                const med = medewerkers.find(m => m.id === medId)
-                return (
-                  <TaakKaart 
-                    key={taak.id}
-                    taak={taak}
-                    kleur={med?.kleur || 'var(--gray-400)'}
-                    isSaving={savingId === taak.id}
-                    onDragStart={onDragStart}
-                    onDragEnd={onDragEnd}
-                    pool
-                  />
-                )
-              })}
-            </div>
-          </div>
-        )
-      })()}
-
       <style>{`
+        .planning-layout {
+          display: grid;
+          grid-template-columns: 280px 1fr;
+          gap: 14px;
+          align-items: flex-start;
+        }
+        .planning-pool {
+          background: white;
+          border: 1px solid var(--gray-200);
+          border-radius: 9px;
+          box-shadow: 0 1px 3px rgba(0,0,0,.05);
+          max-height: calc(100vh - 220px);
+          display: flex;
+          flex-direction: column;
+          position: sticky;
+          top: 70px;
+          transition: outline .15s;
+        }
+        .planning-pool.drop-target {
+          outline: 3px dashed var(--brand-light);
+          outline-offset: -3px;
+          background: var(--brand-50);
+        }
+        .pool-header {
+          padding: 12px 14px;
+          border-bottom: 1px solid var(--gray-100);
+          background: var(--gray-50);
+          border-radius: 9px 9px 0 0;
+        }
+        .pool-list {
+          padding: 8px;
+          overflow-y: auto;
+          flex: 1;
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+        }
+        .planning-grid-wrap {
+          min-width: 0;
+        }
+        .pg-stats {
+          background: white;
+          border: 1px solid var(--gray-200);
+          border-radius: 9px;
+          padding: 10px 14px;
+          margin-bottom: 10px;
+          font-size: 12px;
+          color: var(--gray-700);
+        }
         .planning-grid {
           background: white;
           border: 1px solid var(--gray-200);
@@ -480,27 +469,30 @@ export default function Planning() {
         }
         .pg-header, .pg-row {
           display: grid;
-          grid-template-columns: 180px repeat(5, 1fr);
+          grid-template-columns: 150px repeat(5, 1fr);
         }
         .pg-row { border-top: 1px solid var(--gray-100); }
-        .pg-row-unassigned { background: var(--gray-50); }
         .pg-cell {
-          padding: 10px;
+          padding: 8px;
           border-right: 1px solid var(--gray-100);
-          min-height: 70px;
         }
         .pg-cell:last-child { border-right: none; }
-        .pg-corner { background: var(--gray-50); font-weight: 700; font-size: 11px; color: var(--gray-500); text-transform: uppercase; letter-spacing: .5px; display: flex; align-items: center; }
-        .pg-day-header { background: var(--gray-50); text-align: center; padding: 12px 10px; min-height: auto; }
-        .pg-med-cell { background: var(--gray-50); display: flex; flex-direction: column; justify-content: center; }
+        .pg-corner { background: var(--gray-50); font-weight: 700; font-size: 11px; color: var(--gray-500); text-transform: uppercase; letter-spacing: .5px; display: flex; align-items: center; padding: 12px; }
+        .pg-day-header { background: var(--gray-50); text-align: center; padding: 12px 8px; }
+        .pg-med-cell { background: var(--gray-50); display: flex; flex-direction: column; justify-content: center; padding: 10px 12px; }
         .pg-day-cell { 
-          transition: background .15s; 
+          transition: background .15s, outline .15s;
           min-height: 90px; 
           display: flex; 
           flex-direction: column; 
           gap: 4px;
+          position: relative;
         }
-        .pg-drop-target { background: var(--brand-50); outline: 2px dashed var(--brand-light); outline-offset: -3px; }
+        .pg-day-cell.drop-target { 
+          background: var(--brand-50); 
+          outline: 3px dashed var(--brand-light); 
+          outline-offset: -3px;
+        }
         .taak-kaart {
           padding: 6px 8px;
           border-radius: 5px;
@@ -509,28 +501,62 @@ export default function Planning() {
           cursor: grab;
           color: white;
           user-select: none;
-          transition: opacity .15s, transform .15s;
+          transition: opacity .15s, transform .15s, box-shadow .15s;
           border-left: 3px solid rgba(0,0,0,.2);
         }
         .taak-kaart:hover { transform: translateY(-1px); box-shadow: 0 2px 6px rgba(0,0,0,.15); }
         .taak-kaart:active { cursor: grabbing; }
-        .taak-kaart.saving { opacity: .5; }
-        .taak-kaart.pool { display: inline-block; max-width: 220px; }
+        .taak-kaart.saving { opacity: .4; pointer-events: none; }
+        .taak-kaart.dragging { opacity: .3; }
         .tk-naam { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .tk-meta { opacity: .85; font-size: 9.5px; margin-top: 1px; }
         .tk-instr { background: rgba(255,255,255,.2); padding: 2px 5px; border-radius: 3px; font-size: 9px; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        
+        .pool-kaart {
+          padding: 8px 10px;
+          background: white;
+          border: 1.5px solid var(--gray-200);
+          border-left: 4px solid var(--gray-400);
+          border-radius: 6px;
+          font-size: 11px;
+          line-height: 1.4;
+          cursor: grab;
+          user-select: none;
+          transition: all .15s;
+        }
+        .pool-kaart:hover {
+          border-color: var(--brand-light);
+          border-left-color: var(--brand);
+          transform: translateY(-1px);
+          box-shadow: 0 2px 8px rgba(0,0,0,.08);
+        }
+        .pool-kaart:active { cursor: grabbing; }
+        .pool-kaart.saving { opacity: .4; pointer-events: none; }
+        .pool-kaart.dragging { opacity: .3; }
+        .pk-naam { font-weight: 700; color: var(--gray-900); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .pk-meta { color: var(--gray-500); font-size: 10px; margin-top: 2px; }
+        .pk-tags { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
+        .pk-tag { font-size: 9px; padding: 1px 6px; border-radius: 10px; font-weight: 600; }
+        .pk-tag-tijd { background: var(--gray-100); color: var(--gray-600); }
+        .pk-tag-prijs { background: var(--green-50); color: var(--green); }
+        .pk-tag-instr { background: var(--accent-50); color: #92400e; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+        @media (max-width: 1100px) {
+          .planning-layout { grid-template-columns: 1fr; }
+          .planning-pool { position: static; max-height: 400px; }
+        }
       `}</style>
     </div>
   )
 }
 
-function TaakKaart({ taak, kleur, isSaving, onDragStart, onDragEnd, pool }) {
+function TaakKaart({ taak, kleur, isSaving, isDragging, onDragStart, onDragEnd }) {
   const tijd = taak.geplande_minuten >= 60
     ? `${Math.floor(taak.geplande_minuten/60)}u${taak.geplande_minuten%60 ? (taak.geplande_minuten%60)+'m' : ''}`
     : `${taak.geplande_minuten}m`
   return (
     <div 
-      className={'taak-kaart' + (isSaving ? ' saving' : '') + (pool ? ' pool' : '')}
+      className={'taak-kaart' + (isSaving ? ' saving' : '') + (isDragging ? ' dragging' : '')}
       draggable={!isSaving}
       onDragStart={(e) => onDragStart(e, taak)}
       onDragEnd={onDragEnd}
@@ -545,6 +571,33 @@ function TaakKaart({ taak, kleur, isSaving, onDragStart, onDragEnd, pool }) {
       {taak.bijzondere_instructie && (
         <div className="tk-instr">⚠️ {taak.bijzondere_instructie}</div>
       )}
+    </div>
+  )
+}
+
+function PoolKaart({ taak, isSaving, isDragging, onDragStart, onDragEnd }) {
+  const tijd = taak.geplande_minuten >= 60
+    ? `${Math.floor(taak.geplande_minuten/60)}u${taak.geplande_minuten%60 ? (taak.geplande_minuten%60)+'m' : ''}`
+    : `${taak.geplande_minuten}m`
+  return (
+    <div 
+      className={'pool-kaart' + (isSaving ? ' saving' : '') + (isDragging ? ' dragging' : '')}
+      draggable={!isSaving}
+      onDragStart={(e) => onDragStart(e, taak)}
+      onDragEnd={onDragEnd}
+      title={`${taak.klant?.naam}\n${taak.dienst?.naam}\n${taak.bijzondere_instructie || ''}`}
+    >
+      <div className="pk-naam">{taak.klant?.naam || 'Onbekend'}</div>
+      <div className="pk-meta">
+        {taak.dienst?.naam}{taak.klant?.regio ? ` · ${taak.klant.regio}` : ''}
+      </div>
+      <div className="pk-tags">
+        <span className="pk-tag pk-tag-tijd">{tijd}</span>
+        <span className="pk-tag pk-tag-prijs">€{parseFloat(taak.vaste_prijs||0).toFixed(0)}</span>
+        {taak.bijzondere_instructie && (
+          <span className="pk-tag pk-tag-instr">⚠️ {taak.bijzondere_instructie.slice(0, 40)}</span>
+        )}
+      </div>
     </div>
   )
 }
