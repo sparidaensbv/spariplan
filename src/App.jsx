@@ -3,9 +3,13 @@ import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { supabase } from './lib/supabase'
 import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
-import Klanten from './pages/Klanten'
-import Taken from './pages/Taken'
+import AutoPlanning from './pages/AutoPlanning'
 import Planning from './pages/Planning'
+import Klanten from './pages/Klanten'
+import KlantDetail from './pages/KlantDetail'
+import Taken from './pages/Taken'
+import Medewerkers from './pages/Medewerkers'
+import Instellingen from './pages/Instellingen'
 import Sidebar from './components/Sidebar'
 
 function ConfigError() {
@@ -14,9 +18,8 @@ function ConfigError() {
       <div className="cfg-box">
         <div className="cfg-title">⚠️ Configuratie ontbreekt</div>
         <div className="cfg-text">
-          De app kan geen verbinding maken met Supabase. Je moet eerst de environment variabelen instellen.
+          De app kan geen verbinding maken met Supabase. Stel de environment variabelen in.
         </div>
-        <div className="cfg-text">In Vercel of in een <code>.env</code> bestand:</div>
         <div className="cfg-code">VITE_SUPABASE_URL=https://...supabase.co</div>
         <div className="cfg-code">VITE_SUPABASE_KEY=sb_publishable_...</div>
       </div>
@@ -26,9 +29,12 @@ function ConfigError() {
 
 const titels = {
   '/': 'Dashboard',
-  '/planning': 'Planning',
+  '/auto-planning': 'Auto-planning',
+  '/planning': 'Planning weekoverzicht',
   '/klanten': 'Klanten',
   '/taken': 'Taken',
+  '/medewerkers': 'Medewerkers',
+  '/instellingen': 'Instellingen',
 }
 
 export default function App() {
@@ -37,7 +43,6 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const location = useLocation()
 
-  // Check config
   if (!import.meta.env.VITE_SUPABASE_URL || !import.meta.env.VITE_SUPABASE_KEY) {
     return <ConfigError />
   }
@@ -69,7 +74,8 @@ export default function App() {
   if (loading) return <div className="loading">Laden…</div>
   if (!session) return <Login />
 
-  const titel = titels[location.pathname] || 'Spariplan'
+  let titel = titels[location.pathname] || 'Spariplan'
+  if (location.pathname.startsWith('/klanten/')) titel = 'Klantdetail'
 
   return (
     <div className="shell">
@@ -78,17 +84,19 @@ export default function App() {
         <div className="tb">
           <div className="tb-t">{titel}</div>
           <div className="tb-acts">
-            <span style={{fontSize:11, color:'var(--gray-400)'}}>
-              {session.user.email}
-            </span>
+            <span style={{fontSize:11, color:'var(--gray-400)'}}>{session.user.email}</span>
           </div>
         </div>
         <div className="con">
           <Routes>
             <Route path="/" element={<Dashboard />} />
+            <Route path="/auto-planning" element={<AutoPlanning />} />
             <Route path="/planning" element={<Planning />} />
             <Route path="/klanten" element={<Klanten />} />
+            <Route path="/klanten/:id" element={<KlantDetail />} />
             <Route path="/taken" element={<Taken />} />
+            <Route path="/medewerkers" element={<Medewerkers />} />
+            <Route path="/instellingen" element={<Instellingen />} />
             <Route path="*" element={<Navigate to="/" />} />
           </Routes>
         </div>
