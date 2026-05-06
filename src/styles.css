@@ -219,19 +219,20 @@ tbody tr:hover td { background: var(--gray-50); }
     flex-direction: column;
   }
   .sidebar {
+    position: relative !important;
     width: 100% !important;
     min-height: auto !important;
+    height: auto !important;
     flex-direction: row !important;
     align-items: center;
     padding: 8px 14px !important;
     border-right: none !important;
     border-bottom: 1px solid rgba(255,255,255,.1);
-    position: sticky;
-    top: 0;
-    z-index: 100;
   }
   .sb-logo {
+    padding: 0 !important;
     margin-bottom: 0 !important;
+    border-bottom: none !important;
     flex-shrink: 0;
   }
   .sb-nav {
@@ -251,6 +252,7 @@ tbody tr:hover td { background: var(--gray-50); }
     display: none;
   }
   .main {
+    margin-left: 0 !important;
     width: 100% !important;
     flex: 1;
   }

@@ -20,17 +20,27 @@ export default function Facturatie({ profile }) {
       supabase.from('taken').select(`
         id, jaar, weeknummer, geplande_datum, geplande_minuten, werkelijke_minuten,
         vaste_prijs, status, factuur_status, klaar_op, factuur_verstuurd_op,
-        notitie_medewerker, bijzondere_instructie,
+        notitie_medewerker, bijzondere_instructie, medewerker_id,
         klant:klanten(naam, klantnummer, adres, factuur_email, factuur_methode),
         dienst:diensten(naam),
         medewerker:medewerkers(naam, kleur, id)
       `)
         .in('factuur_status', ['klaar_voor_factuur', 'verstuurd', 'verwerkt'])
-        .order('klaar_op', { ascending: false })
         .limit(2000),
       supabase.from('medewerkers').select('*').order('naam')
     ])
-    setTaken(takenRes.data || [])
+    
+    if (takenRes.error) console.error('Facturatie load error:', takenRes.error)
+    
+    // Sorteer client-side: meest recent eerst, NULLs achteraan
+    const sorted = (takenRes.data || []).sort((a, b) => {
+      if (!a.klaar_op && !b.klaar_op) return (b.weeknummer || 0) - (a.weeknummer || 0)
+      if (!a.klaar_op) return 1
+      if (!b.klaar_op) return -1
+      return new Date(b.klaar_op) - new Date(a.klaar_op)
+    })
+    
+    setTaken(sorted)
     setMedewerkers(medRes.data || [])
     setLoading(false)
   }
