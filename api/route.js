@@ -1,5 +1,4 @@
-// Vercel Serverless Function — route via OSRM
-// Wordt beschikbaar op /api/route?coords=lon1,lat1;lon2,lat2
+// Vercel Serverless Function — OSRM route met optionele geometrie
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*')
@@ -10,14 +9,15 @@ export default async function handler(req, res) {
     return res.status(200).end()
   }
   
-  const { coords } = req.query
+  const { coords, overview = 'false', geometries = 'polyline' } = req.query
   
   if (!coords) {
     return res.status(400).json({ error: 'Geen coords opgegeven' })
   }
   
   try {
-    const url = `https://router.project-osrm.org/route/v1/driving/${coords}?overview=false`
+    const params = new URLSearchParams({ overview, geometries })
+    const url = `https://router.project-osrm.org/route/v1/driving/${coords}?${params}`
     const response = await fetch(url)
     
     if (!response.ok) {

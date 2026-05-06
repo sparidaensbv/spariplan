@@ -1,5 +1,6 @@
 import { useEffect, useState, useMemo } from 'react'
 import { supabase } from '../lib/supabase'
+import RouteKaart from '../components/RouteKaart'
 
 const DAGEN_WERKDAGEN = [
   { key: 1, naam: 'maandag', label: 'Ma' },
@@ -90,7 +91,7 @@ export default function AutoPlanning() {
       supabase.from('klant_diensten').select(`
         id, weeknummers, vaste_prijs, geplande_minuten, bijzondere_instructie,
         voorkeur_dag, voorkeur_dagdeel, voorkeur_medewerker_id, voorkeur_hardheid,
-        klant:klanten(id, naam, regio, adres, postcode_cijfers),
+        klant:klanten(id, naam, regio, adres, postcode_cijfers, latitude, longitude),
         dienst:diensten(id, naam)
       `).limit(5000),
       supabase.from('taken').select('klant_id, dienst_id, jaar, weeknummer').limit(5000),
@@ -254,7 +255,7 @@ export default function AutoPlanning() {
       </div>
 
       {/* VOORBEELD */}
-      {voorbeeld && <Voorbeeld voorbeeld={voorbeeld} medewerkers={medewerkers} doeljaar={doeljaar} doelweek={doelweek} />}
+      {voorbeeld && <Voorbeeld voorbeeld={voorbeeld} medewerkers={medewerkers} doeljaar={doeljaar} doelweek={doelweek} instelling={instelling} />}
 
       {/* TE GENEREREN LIJST */}
       {!voorbeeld && teGenereren.length > 0 && (
@@ -509,6 +510,8 @@ function doSmartPlanning(klantDiensten, medewerkers, jaar, week, feestdagen, his
       bijzondere_instructie: kd.bijzondere_instructie || null,
       klant_naam: kd.klant.naam,
       klant_adres: kd.klant.adres,
+      lat: kd.klant.latitude,
+      lon: kd.klant.longitude,
       postcode: kd.klant.postcode_cijfers,
       regio: kd.klant.regio,
       dienst_naam: kd.dienst.naam,
@@ -552,21 +555,31 @@ function doSmartPlanning(klantDiensten, medewerkers, jaar, week, feestdagen, his
 }
 
 // VOORBEELD COMPONENT
-function Voorbeeld({ voorbeeld, medewerkers, doeljaar, doelweek }) {
+function Voorbeeld({ voorbeeld, medewerkers, doeljaar, doelweek, instelling }) {
   const { taken, onmogelijk, geblokkeerdeDagen, belasting } = voorbeeld
   
-  // Groepeer per medewerker per dag
+  const bedrijfStart = {
+    lat: instelling?.bedrijf_latitude || 51.3680,
+    lon: instelling?.bedrijf_longitude || 5.2150,
+    naam: instelling?.bedrijfsnaam || 'Sparidaens BV'
+  }
+  
+  // Groepeer per medewerker per dag (per dag: route_volgorde sortering)
   const groepen = {}
   medewerkers.forEach(m => {
     groepen[m.id] = {}
-    DAGEN.forEach(d => {
-      groepen[m.id][d.key] = []
-    })
+    DAGEN.forEach(d => { groepen[m.id][d.key] = [] })
   })
   taken.forEach(t => {
     if (!groepen[t.medewerker_id]) groepen[t.medewerker_id] = {}
     if (!groepen[t.medewerker_id][t.dag]) groepen[t.medewerker_id][t.dag] = []
     groepen[t.medewerker_id][t.dag].push(t)
+  })
+  // Sorteer elke dag op route_volgorde
+  Object.keys(groepen).forEach(medId => {
+    Object.keys(groepen[medId]).forEach(dagKey => {
+      groepen[medId][dagKey].sort((a, b) => (a.route_volgorde || 0) - (b.route_volgorde || 0))
+    })
   })
 
   return (
@@ -594,61 +607,174 @@ function Voorbeeld({ voorbeeld, medewerkers, doeljaar, doelweek }) {
         </div>
       )}
 
-      {/* Per medewerker */}
+      {/* Per medewerker een sectie met daarin per dag een kaart */}
       {medewerkers.map(m => {
+        const dagenMetTaken = DAGEN.filter(d => (groepen[m.id]?.[d.key] || []).length > 0)
+        if (dagenMetTaken.length === 0) return null
+        
         const totaalMin = DAGEN.reduce((s, d) => s + (belasting[m.id]?.[d.key] || 0), 0)
         const aantalTaken = DAGEN.reduce((s, d) => s + (groepen[m.id]?.[d.key]?.length || 0), 0)
         const initials = m.naam.split(' ').map(n => n[0]).slice(0,2).join('')
-        if (aantalTaken === 0) return null
+        
         return (
-          <div key={m.id} className="card" style={{marginBottom:14}}>
-            <div className="ch">
-              <div style={{display:'flex', alignItems:'center', gap:10}}>
-                <div className="av av-blue" style={{background: m.kleur, width:36, height:36, fontSize:13}}>{initials}</div>
-                <div>
-                  <div className="ct">{m.naam}</div>
-                  <div style={{fontSize:11, color:'var(--gray-500)'}}>{aantalTaken} klussen · {(totaalMin/60).toFixed(1)}u over de week</div>
+          <div key={m.id} style={{marginBottom:18}}>
+            {/* Medewerker header */}
+            <div style={{
+              display:'flex', alignItems:'center', gap:12,
+              padding:'10px 14px',
+              background:m.kleur,
+              color:'white',
+              borderRadius:'9px 9px 0 0',
+              fontWeight:700,
+            }}>
+              <div className="av av-blue" style={{
+                background:'rgba(255,255,255,.25)', 
+                width:32, height:32, fontSize:12,
+                border:'2px solid rgba(255,255,255,.5)'
+              }}>{initials}</div>
+              <div style={{flex:1}}>
+                <div style={{fontSize:14}}>{m.naam}</div>
+                <div style={{fontSize:11, opacity:.85}}>
+                  {aantalTaken} klussen · {(totaalMin/60).toFixed(1)}u over {dagenMetTaken.length} {dagenMetTaken.length === 1 ? 'dag' : 'dagen'}
                 </div>
               </div>
             </div>
             
-            <div style={{display:'grid', gridTemplateColumns:`repeat(${DAGEN.length}, 1fr)`, gap:1, background:'var(--gray-200)'}}>
-              {DAGEN.map(d => {
-                const dagTaken = groepen[m.id]?.[d.key] || []
-                const datum = datumVoorDag(doeljaar, doelweek, d.key)
-                const dagMin = belasting[m.id]?.[d.key] || 0
-                const isFeest = geblokkeerdeDagen.find(g => g.key === d.key)
-                return (
-                  <div key={d.key} style={{
-                    background: isFeest ? '#fef2f2' : 'white',
-                    padding: '8px 6px',
-                    minHeight: 100
+            {/* Per dag een card met kaart en lijst */}
+            {dagenMetTaken.map((d, dIdx) => {
+              const dagTaken = groepen[m.id]?.[d.key] || []
+              const datum = datumVoorDag(doeljaar, doelweek, d.key)
+              const dagMin = belasting[m.id]?.[d.key] || 0
+              const isFeest = geblokkeerdeDagen.find(g => g.key === d.key)
+              const isLast = dIdx === dagenMetTaken.length - 1
+              
+              // Stops voor de kaart
+              const stops = dagTaken.map(t => ({
+                id: t.kd_id,
+                lat: t.lat,
+                lon: t.lon,
+                naam: t.klant_naam,
+                adres: t.klant_adres,
+                postcode: t.postcode,
+                tijd_start: t.tijd_start,
+                dienst_naam: t.dienst_naam,
+                bijzondere_instructie: t.bijzondere_instructie,
+              }))
+              const stopsMetCoords = stops.filter(s => s.lat && s.lon)
+              
+              return (
+                <div key={d.key} style={{
+                  background:'white',
+                  border:'1px solid var(--gray-200)',
+                  borderTop:'none',
+                  borderRadius: isLast ? '0 0 9px 9px' : '0',
+                }}>
+                  {/* Dag header */}
+                  <div style={{
+                    padding:'10px 14px',
+                    background: isFeest ? '#fef2f2' : 'var(--gray-50)',
+                    borderBottom:'1px solid var(--gray-200)',
+                    display:'flex', alignItems:'center', gap:10,
                   }}>
-                    <div style={{fontSize:10, fontWeight:700, color: isFeest ? 'var(--red)' : 'var(--gray-600)', textTransform:'uppercase', marginBottom:6, paddingBottom:4, borderBottom:'1px solid var(--gray-100)'}}>
-                      {d.label} {datum.getDate()}/{datum.getMonth()+1} {isFeest ? '🎉' : ''}
-                      <span style={{float:'right', fontWeight:600, color:'var(--gray-500)'}}>{(dagMin/60).toFixed(1)}u</span>
+                    <div style={{
+                      background: isFeest ? 'var(--red)' : m.kleur,
+                      color:'white',
+                      padding:'4px 10px',
+                      borderRadius:5,
+                      fontSize:11,
+                      fontWeight:700,
+                      minWidth:50,
+                      textAlign:'center'
+                    }}>{d.label}</div>
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:13, fontWeight:700}}>
+                        {d.naam.charAt(0).toUpperCase() + d.naam.slice(1)} {datum.getDate()} {['januari','februari','maart','april','mei','juni','juli','augustus','september','oktober','november','december'][datum.getMonth()]}
+                        {isFeest && <span style={{marginLeft:8, color:'var(--red)', fontSize:11}}>🎉 {isFeest.feest.naam}</span>}
+                      </div>
+                      <div style={{fontSize:11, color:'var(--gray-500)'}}>
+                        {dagTaken.length} {dagTaken.length === 1 ? 'klus' : 'klussen'} · {(dagMin/60).toFixed(1)}u
+                        {stopsMetCoords.length < dagTaken.length && (
+                          <span style={{color:'var(--orange)'}}>
+                            {' '}· {dagTaken.length - stopsMetCoords.length} zonder coördinaten
+                          </span>
+                        )}
+                      </div>
                     </div>
-                    {dagTaken.length === 0 ? (
-                      <div style={{fontSize:10, color:'var(--gray-300)', textAlign:'center', padding:'12px 0'}}>·</div>
-                    ) : (
-                      dagTaken.map(t => (
-                        <div key={t.kd_id} style={{
-                          padding:'5px 7px', marginBottom:3, background:'var(--gray-50)', borderRadius:4,
-                          borderLeft:`3px solid ${m.kleur}`, fontSize:10, lineHeight:1.3
-                        }}>
-                          <div style={{fontFamily:'DM Mono, monospace', fontSize:9, color:'var(--gray-500)'}}>
-                            {t.tijd_start.slice(0,5)}
-                          </div>
-                          <div style={{fontWeight:700, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'}}>{t.klant_naam}</div>
-                          <div style={{color:'var(--gray-500)', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'}}>{t.dienst_naam}</div>
-                          {t.postcode && <div style={{fontFamily:'DM Mono, monospace', fontSize:9, color:'var(--brand)'}}>📍 {t.postcode}</div>}
-                        </div>
-                      ))
-                    )}
                   </div>
-                )
-              })}
-            </div>
+                  
+                  <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:0}}>
+                    {/* Linker kant: lijst met stops */}
+                    <div style={{padding:'10px 14px', borderRight:'1px solid var(--gray-100)'}}>
+                      <div style={{fontSize:10, fontWeight:700, color:'var(--gray-500)', textTransform:'uppercase', letterSpacing:.5, marginBottom:8}}>
+                        Volgorde
+                      </div>
+                      <div style={{display:'flex', flexDirection:'column', gap:6}}>
+                        {dagTaken.map((t, i) => (
+                          <div key={t.kd_id} style={{
+                            display:'flex', alignItems:'flex-start', gap:8,
+                            padding:'6px 8px',
+                            background:'var(--gray-50)', borderRadius:5,
+                            borderLeft:`3px solid ${m.kleur}`
+                          }}>
+                            <div style={{
+                              minWidth:22, height:22, borderRadius:'50%',
+                              background:m.kleur, color:'white',
+                              display:'flex', alignItems:'center', justifyContent:'center',
+                              fontSize:10, fontWeight:800
+                            }}>{i + 1}</div>
+                            <div style={{flex:1, minWidth:0}}>
+                              <div style={{fontSize:11.5, fontWeight:700, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'}}>
+                                {t.klant_naam}
+                              </div>
+                              <div style={{fontSize:10.5, color:'var(--gray-500)', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'}}>
+                                {t.dienst_naam} · {t.minuten}m
+                              </div>
+                              <div style={{display:'flex', alignItems:'center', gap:8, marginTop:2, fontSize:10}}>
+                                <span style={{fontFamily:'DM Mono, monospace', color:'var(--brand)', fontWeight:700}}>
+                                  ⏱️ {t.tijd_start?.slice(0,5)}
+                                </span>
+                                {t.postcode && (
+                                  <span style={{fontFamily:'DM Mono, monospace', color:'var(--gray-500)'}}>
+                                    📍 {t.postcode}
+                                  </span>
+                                )}
+                                {(!t.lat || !t.lon) && (
+                                  <span style={{color:'var(--orange)'}} title="Geen coördinaten beschikbaar">⚠️</span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    
+                    {/* Rechter kant: kaart */}
+                    <div style={{padding:10}}>
+                      {stopsMetCoords.length > 0 ? (
+                        <RouteKaart 
+                          stops={stops}
+                          medewerkerKleur={m.kleur}
+                          bedrijfStart={bedrijfStart}
+                          showRoute={true}
+                          hoogte={Math.max(180, Math.min(280, 80 + dagTaken.length * 30))}
+                        />
+                      ) : (
+                        <div style={{
+                          height:180, display:'flex', alignItems:'center', justifyContent:'center',
+                          background:'var(--gray-50)', borderRadius:7,
+                          border:'1px dashed var(--gray-300)',
+                          fontSize:11.5, color:'var(--gray-400)', textAlign:'center', padding:20
+                        }}>
+                          ⚠️ Klanten hebben nog geen coördinaten
+                          <br/>
+                          <span style={{fontSize:10, marginTop:4}}>Draai eerst geocoding op Geocoding pagina</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
           </div>
         )
       })}

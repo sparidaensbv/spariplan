@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { geocodeerAlleKlanten, geocodeerAdres, optimaliseerRoute, formatAfstand, formatTijd } from '../lib/routing'
+import RouteKaart from '../components/RouteKaart'
 
 export default function Geocoding() {
   const [stats, setStats] = useState(null)
@@ -353,12 +354,30 @@ function RouteTest({ stats, bedrijfsadres }) {
                     )}
                   </span>
                 </div>
+                
+                {/* KAART met route */}
+                <div style={{marginBottom:14}}>
+                  <RouteKaart 
+                    stops={resultaat.volgorde.map(k => ({
+                      id: k.id, lat: k.lat, lon: k.lon, naam: k.naam, adres: k.adres, postcode: k.postcode
+                    }))}
+                    medewerkerKleur="#1e4a8a"
+                    bedrijfStart={bedrijfsadres ? {
+                      lat: bedrijfsadres.bedrijf_latitude, 
+                      lon: bedrijfsadres.bedrijf_longitude,
+                      naam: bedrijfsadres.bedrijfsnaam || 'Sparidaens BV'
+                    } : undefined}
+                    showRoute={true}
+                    hoogte={400}
+                  />
+                </div>
+                
                 <div style={{fontSize:11, fontWeight:700, color:'var(--gray-600)', textTransform:'uppercase', letterSpacing:.5, marginBottom:8}}>
                   Optimale volgorde:
                 </div>
                 <div style={{display:'flex', flexDirection:'column', gap:6}}>
                   <div style={{padding:'8px 12px', background:'var(--brand-50)', borderRadius:6, fontSize:12, display:'flex', alignItems:'center', gap:10}}>
-                    <div style={{width:24, height:24, borderRadius:'50%', background:'var(--brand)', color:'white', display:'flex', alignItems:'center', justifyContent:'center', fontSize:10, fontWeight:700, flexShrink:0}}>S</div>
+                    <div style={{width:24, height:24, borderRadius:'50%', background:'var(--brand)', color:'white', display:'flex', alignItems:'center', justifyContent:'center', fontSize:10, fontWeight:700, flexShrink:0}}>🏠</div>
                     <div>
                       <div style={{fontWeight:700}}>Bedrijf — startpunt</div>
                       <div style={{fontSize:10.5, color:'var(--gray-500)'}}>Sparidaens BV, Bladel</div>
@@ -379,7 +398,7 @@ function RouteTest({ stats, bedrijfsadres }) {
                     </div>
                   ))}
                   <div style={{padding:'8px 12px', background:'var(--brand-50)', borderRadius:6, fontSize:12, display:'flex', alignItems:'center', gap:10}}>
-                    <div style={{width:24, height:24, borderRadius:'50%', background:'var(--brand)', color:'white', display:'flex', alignItems:'center', justifyContent:'center', fontSize:10, fontWeight:700, flexShrink:0}}>E</div>
+                    <div style={{width:24, height:24, borderRadius:'50%', background:'var(--brand)', color:'white', display:'flex', alignItems:'center', justifyContent:'center', fontSize:10, fontWeight:700, flexShrink:0}}>🏠</div>
                     <div>
                       <div style={{fontWeight:700}}>Terug naar bedrijf</div>
                       <div style={{fontSize:10.5, color:'var(--gray-500)'}}>Einde route</div>
