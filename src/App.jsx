@@ -9,6 +9,7 @@ import Klanten from './pages/Klanten'
 import KlantDetail from './pages/KlantDetail'
 import Taken from './pages/Taken'
 import Medewerkers from './pages/Medewerkers'
+import Geocoding from './pages/Geocoding'
 import Instellingen from './pages/Instellingen'
 import Sidebar from './components/Sidebar'
 
@@ -34,6 +35,7 @@ const titels = {
   '/klanten': 'Klanten',
   '/taken': 'Taken',
   '/medewerkers': 'Medewerkers',
+  '/geocoding': 'Geocoding & route',
   '/instellingen': 'Instellingen',
 }
 
@@ -96,6 +98,7 @@ export default function App() {
             <Route path="/klanten/:id" element={<KlantDetail />} />
             <Route path="/taken" element={<Taken />} />
             <Route path="/medewerkers" element={<Medewerkers />} />
+            <Route path="/geocoding" element={<Geocoding />} />
             <Route path="/instellingen" element={<Instellingen />} />
             <Route path="*" element={<Navigate to="/" />} />
           </Routes>

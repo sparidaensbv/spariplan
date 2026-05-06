@@ -31,6 +31,9 @@ export default function Sidebar({ user, profile }) {
         <NavLink to="/medewerkers" className={({isActive}) => 'si' + (isActive ? ' active' : '')}>
           <span className="si-ic">👤</span>Medewerkers
         </NavLink>
+        <NavLink to="/geocoding" className={({isActive}) => 'si' + (isActive ? ' active' : '')}>
+          <span className="si-ic">📍</span>Geocoding & route
+        </NavLink>
         <NavLink to="/instellingen" className={({isActive}) => 'si' + (isActive ? ' active' : '')}>
           <span className="si-ic">⚙️</span>Instellingen
         </NavLink>
