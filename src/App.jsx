@@ -11,6 +11,8 @@ import Taken from './pages/Taken'
 import Medewerkers from './pages/Medewerkers'
 import Geocoding from './pages/Geocoding'
 import Instellingen from './pages/Instellingen'
+import MijnWerk from './pages/MijnWerk'
+import Facturatie from './pages/Facturatie'
 import Sidebar from './components/Sidebar'
 
 function ConfigError() {
@@ -28,15 +30,20 @@ function ConfigError() {
   )
 }
 
-const titels = {
+const titelsAdmin = {
   '/': 'Dashboard',
   '/auto-planning': 'Auto-planning',
   '/planning': 'Planning weekoverzicht',
+  '/facturatie': 'Facturatie',
   '/klanten': 'Klanten',
   '/taken': 'Taken',
   '/medewerkers': 'Medewerkers',
   '/geocoding': 'Geocoding & route',
   '/instellingen': 'Instellingen',
+}
+
+const titelsMedewerker = {
+  '/': 'Mijn taken',
 }
 
 export default function App() {
@@ -75,7 +82,10 @@ export default function App() {
 
   if (loading) return <div className="loading">Laden…</div>
   if (!session) return <Login />
+  if (!profile) return <div className="loading">Profiel laden…</div>
 
+  const isAdmin = profile.rol === 'admin'
+  const titels = isAdmin ? titelsAdmin : titelsMedewerker
   let titel = titels[location.pathname] || 'Spariplan'
   if (location.pathname.startsWith('/klanten/')) titel = 'Klantdetail'
 
@@ -90,18 +100,26 @@ export default function App() {
           </div>
         </div>
         <div className="con">
-          <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/auto-planning" element={<AutoPlanning />} />
-            <Route path="/planning" element={<Planning />} />
-            <Route path="/klanten" element={<Klanten />} />
-            <Route path="/klanten/:id" element={<KlantDetail />} />
-            <Route path="/taken" element={<Taken />} />
-            <Route path="/medewerkers" element={<Medewerkers />} />
-            <Route path="/geocoding" element={<Geocoding />} />
-            <Route path="/instellingen" element={<Instellingen />} />
-            <Route path="*" element={<Navigate to="/" />} />
-          </Routes>
+          {isAdmin ? (
+            <Routes>
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/auto-planning" element={<AutoPlanning />} />
+              <Route path="/planning" element={<Planning />} />
+              <Route path="/facturatie" element={<Facturatie profile={profile} />} />
+              <Route path="/klanten" element={<Klanten />} />
+              <Route path="/klanten/:id" element={<KlantDetail />} />
+              <Route path="/taken" element={<Taken />} />
+              <Route path="/medewerkers" element={<Medewerkers />} />
+              <Route path="/geocoding" element={<Geocoding />} />
+              <Route path="/instellingen" element={<Instellingen />} />
+              <Route path="*" element={<Navigate to="/" />} />
+            </Routes>
+          ) : (
+            <Routes>
+              <Route path="/" element={<MijnWerk user={session.user} profile={profile} />} />
+              <Route path="*" element={<Navigate to="/" />} />
+            </Routes>
+          )}
         </div>
       </div>
     </div>
