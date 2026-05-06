@@ -23,7 +23,7 @@ export default function Facturatie({ profile }) {
         notitie_medewerker, bijzondere_instructie, medewerker_id,
         klant:klanten(naam, klantnummer, adres),
         dienst:diensten(naam),
-        medewerker:medewerkers(naam, kleur, id)
+        medewerker:medewerkers!medewerker_id(naam, kleur, id)
       `)
         .in('factuur_status', ['klaar_voor_factuur', 'verstuurd', 'verwerkt'])
         .limit(2000),
