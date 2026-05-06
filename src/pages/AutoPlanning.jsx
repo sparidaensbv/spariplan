@@ -138,10 +138,32 @@ export default function AutoPlanning() {
   }, [historie])
 
   // Voorbeeld genereren (preview, niet opslaan)
-  function genereerVoorbeeld() {
+  const [optimaliseren, setOptimaliseren] = useState(false)
+  const [optimProgress, setOptimProgress] = useState(null)
+  
+  async function genereerVoorbeeld() {
     const feestdagen = getCAOFeestdagen(doeljaar)
     const result = doSmartPlanning(teGenereren, medewerkers, doeljaar, doelweek, feestdagen, historischeVoorkeur, instelling?.zaterdag_werkdag || false)
+    
+    // Toon eerst de basis-planning
     setVoorbeeld(result)
+    
+    // Dan async route-optimalisatie via OSRM
+    setOptimaliseren(true)
+    setOptimProgress(null)
+    try {
+      const bedrijfStart = {
+        lat: instelling?.bedrijf_latitude || 51.3680,
+        lon: instelling?.bedrijf_longitude || 5.2150
+      }
+      const geoptimaliseerd = await optimaliseerVolgordes(result, bedrijfStart, (p) => setOptimProgress(p))
+      // Zorg dat React re-rendert door nieuw object te maken
+      setVoorbeeld({ ...geoptimaliseerd, taken: [...geoptimaliseerd.taken] })
+    } catch (e) {
+      console.error('Route-optimalisatie mislukt:', e)
+    }
+    setOptimaliseren(false)
+    setOptimProgress(null)
   }
 
   async function genereerEnOpslaan() {
@@ -204,20 +226,28 @@ export default function AutoPlanning() {
             </div>
             <div style={{flex:1}}></div>
             {!voorbeeld ? (
-              <button className="btn bp" onClick={genereerVoorbeeld} disabled={teGenereren.length === 0}>
-                🔮 Toon voorbeeld
+              <button className="btn bp" onClick={genereerVoorbeeld} disabled={teGenereren.length === 0 || optimaliseren}>
+                {optimaliseren ? 'Bezig met genereren…' : '🔮 Toon voorbeeld'}
               </button>
             ) : (
               <>
                 <button className="btn bg bsm" onClick={() => setVoorbeeld(null)}>
                   Annuleer
                 </button>
-                <button className="btn bp" onClick={genereerEnOpslaan} disabled={genereren}>
-                  {genereren ? 'Bezig…' : `✓ Bevestig & opslaan (${voorbeeld.taken.length})`}
+                <button className="btn bp" onClick={genereerEnOpslaan} disabled={genereren || optimaliseren}>
+                  {genereren ? 'Bezig…' : optimaliseren ? `🛣️ Route optimaliseren ${optimProgress ? `${optimProgress.huidig}/${optimProgress.totaal}` : ''}` : `✓ Bevestig & opslaan (${voorbeeld.taken.length})`}
                 </button>
               </>
             )}
           </div>
+          
+          {optimaliseren && (
+            <div style={{marginTop:10, padding:'8px 14px', background:'var(--brand-50)', borderRadius:7, fontSize:12, color:'var(--brand)', display:'flex', alignItems:'center', gap:10}}>
+              <div className="spinner" style={{width:14, height:14, border:'2px solid var(--brand-light)', borderTopColor:'transparent', borderRadius:'50%', animation:'spin 0.8s linear infinite'}}></div>
+              <span>🛣️ Route optimaliseren via OSRM... {optimProgress && `(${optimProgress.huidig} / ${optimProgress.totaal} dagen)`}</span>
+              <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
+            </div>
+          )}
 
           {resultaat && (
             <div style={{
@@ -523,7 +553,8 @@ function doSmartPlanning(klantDiensten, medewerkers, jaar, week, feestdagen, his
     })
   })
   
-  // Stap 5: Per medewerker per dag → sorteer op postcode (route-clustering)
+  // Stap 5: Per medewerker per dag → eerste sortering op postcode
+  // (echte OSRM route-optimalisatie gebeurt later async via optimaliseerVolgordes)
   const groepen = {}
   taken.forEach(t => {
     const key = `${t.medewerker_id}_${t.dag}`
@@ -533,25 +564,96 @@ function doSmartPlanning(klantDiensten, medewerkers, jaar, week, feestdagen, his
   Object.values(groepen).forEach(items => {
     items.sort((a, b) => (a.postcode || 'zzzz').localeCompare(b.postcode || 'zzzz'))
     items.forEach((t, idx) => { t.route_volgorde = idx })
-    
-    // Hertel start-tijden in route-volgorde
-    let cursor = null
-    items.forEach(t => {
-      // Bepaal start
-      let startMin = 8 * 60
-      if (t.voorkeur_dagdeel === 'middag') startMin = 13 * 60
-      else if (t.voorkeur_dagdeel === 'avond') startMin = 18 * 60
-      
-      if (cursor !== null && cursor > startMin) startMin = cursor
-      
-      const h = Math.floor(startMin / 60)
-      const m = startMin % 60
-      t.tijd_start = `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:00`
-      cursor = startMin + t.minuten + 15  // 15 min reistijd inschatting
-    })
+    hertelStartTijden(items)
   })
 
   return { taken, onmogelijk, geblokkeerdeDagen, belasting }
+}
+
+// Hulpmethode: tijd-start opnieuw berekenen op basis van volgorde
+function hertelStartTijden(items) {
+  let cursor = null
+  items.forEach(t => {
+    let startMin = 8 * 60
+    if (t.voorkeur_dagdeel === 'middag') startMin = 13 * 60
+    else if (t.voorkeur_dagdeel === 'avond') startMin = 18 * 60
+    
+    if (cursor !== null && cursor > startMin) startMin = cursor
+    
+    const h = Math.floor(startMin / 60)
+    const m = startMin % 60
+    t.tijd_start = `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:00`
+    cursor = startMin + t.minuten + 15  // 15 min reistijd inschatting
+  })
+}
+
+/**
+ * Async route-optimalisatie: per medewerker per dag de volgorde optimaliseren via OSRM
+ * Gebruikt nearest-neighbor + 2-opt vanaf het bedrijfspunt
+ */
+async function optimaliseerVolgordes(voorbeeld, bedrijfStart, onProgress) {
+  const { taken } = voorbeeld
+  
+  // Importeer OSRM functie
+  const { optimaliseerRoute } = await import('../lib/routing')
+  
+  // Groepeer per medewerker per dag
+  const groepen = {}
+  taken.forEach(t => {
+    const key = `${t.medewerker_id}_${t.dag}`
+    if (!groepen[key]) groepen[key] = []
+    groepen[key].push(t)
+  })
+  
+  const groupKeys = Object.keys(groepen)
+  let huidig = 0
+  
+  for (const key of groupKeys) {
+    huidig++
+    const items = groepen[key]
+    if (items.length < 2) continue
+    
+    // Filter alleen taken met coördinaten
+    const metCoords = items.filter(t => t.lat && t.lon)
+    const zonderCoords = items.filter(t => !t.lat || !t.lon)
+    
+    if (metCoords.length < 2) continue
+    
+    if (onProgress) onProgress({ huidig, totaal: groupKeys.length })
+    
+    try {
+      const bezoeken = metCoords.map(t => ({
+        id: t.kd_id,
+        lat: t.lat,
+        lon: t.lon
+      }))
+      
+      const result = await optimaliseerRoute(bedrijfStart, bezoeken, true)
+      
+      if (result && result.volgorde && !result.error) {
+        // Reorder taken volgens result.volgorde
+        const lookup = new Map(metCoords.map(t => [t.kd_id, t]))
+        const nieuweVolgorde = result.volgorde
+          .map(b => lookup.get(b.id))
+          .filter(Boolean)
+        
+        // Plaats taken zonder coördinaten achteraan
+        const finaleVolgorde = [...nieuweVolgorde, ...zonderCoords]
+        
+        // Update route_volgorde en tijd_start in originele items array
+        finaleVolgorde.forEach((t, idx) => { t.route_volgorde = idx })
+        hertelStartTijden(finaleVolgorde)
+        
+        // Vervang in items
+        items.length = 0
+        items.push(...finaleVolgorde)
+      }
+    } catch (e) {
+      console.warn('Route optimalisatie mislukt voor', key, e)
+    }
+  }
+  
+  return voorbeeld
 }
 
 // VOORBEELD COMPONENT
