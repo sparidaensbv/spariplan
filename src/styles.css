@@ -215,6 +215,42 @@ tbody tr:hover td { background: var(--gray-50); }
 
 /* MOBILE RESPONSIVE — voor medewerker werkbon-pagina */
 @media (max-width: 768px) {
+  /* LOGIN MOBIEL */
+  .login-wrap {
+    flex-direction: column;
+  }
+  .login-side {
+    max-width: 100% !important;
+    width: 100%;
+    padding: 24px 20px !important;
+    flex: none;
+  }
+  .login-logo {
+    margin-bottom: 18px !important;
+  }
+  .login-tagline {
+    font-size: 18px !important;
+    margin-bottom: 6px !important;
+  }
+  .login-sub {
+    font-size: 12px !important;
+  }
+  .login-feats {
+    display: none !important;
+  }
+  .login-form-wrap {
+    padding: 24px 20px !important;
+    flex: 1;
+  }
+  .login-title {
+    font-size: 18px !important;
+  }
+  .login-subtitle {
+    margin-bottom: 18px !important;
+  }
+  .login-side::before {
+    display: none;
+  }
   .shell { 
     flex-direction: column;
   }
