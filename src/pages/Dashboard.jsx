@@ -12,7 +12,7 @@ export default function Dashboard() {
       const [klantenRes, takenRes, klantDienstenRes] = await Promise.all([
         supabase.from('klanten').select('id, type'),
         supabase.from('taken').select('jaar, weeknummer, geplande_minuten, vaste_prijs, status'),
-        supabase.from('klant_diensten').select('weeknummers, vaste_prijs, geplande_minuten'),
+        supabase.from('klant_diensten').select('weeknummers, vaste_prijs, geplande_minuten').limit(5000),
       ])
 
       const klanten = klantenRes.data || []
@@ -35,7 +35,7 @@ export default function Dashboard() {
         if (wk > 52) continue
         let klussen = 0, minuten = 0, omzet = 0
         klantDiensten.forEach(kd => {
-          if (kd.weeknummers && kd.weeknummers.includes(wk)) {
+          if (kd.weeknummers && kd.weeknummers.some(w => Number(w) === wk)) {
             klussen += 1
             minuten += kd.geplande_minuten || 0
             omzet += parseFloat(kd.vaste_prijs || 0)

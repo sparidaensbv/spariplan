@@ -84,13 +84,13 @@ export default function AutoPlanning() {
   async function laadAlles() {
     const [kdRes, takenRes, historieRes, medRes] = await Promise.all([
       supabase.from('klant_diensten').select(`
-        id, weeknummers, vaste_prijs, geplande_minuten, bijzondere_instructie,
+        id, weeknummers, vaste_prijs, geplande_minuten, bijzondere_instructie, actief,
         voorkeur_dag, voorkeur_dagdeel, voorkeur_medewerker_id, voorkeur_hardheid,
         klant:klanten(id, naam, regio, adres, postcode_cijfers),
         dienst:diensten(id, naam)
-      `),
-      supabase.from('taken').select('klant_id, dienst_id, jaar, weeknummer'),
-      supabase.from('taken').select('klant_dienst_id, medewerker_id, status').not('medewerker_id', 'is', null),
+      `).limit(5000),
+      supabase.from('taken').select('klant_id, dienst_id, jaar, weeknummer').limit(5000),
+      supabase.from('taken').select('klant_dienst_id, medewerker_id, status').not('medewerker_id', 'is', null).limit(5000),
       supabase.from('medewerkers').select('*').eq('actief', true).order('naam')
     ])
     setKlantDiensten(kdRes.data || [])
@@ -102,7 +102,11 @@ export default function AutoPlanning() {
 
   // Bepaal welke klant-diensten in de doelweek vallen en nog niet bestaan
   const teGenereren = useMemo(() => {
-    const inWeek = klantDiensten.filter(kd => kd.weeknummers && kd.weeknummers.includes(doelweek))
+    const inWeek = klantDiensten.filter(kd => {
+      if (!kd.weeknummers) return false
+      // Werk met zowel number als string array
+      return kd.weeknummers.some(w => Number(w) === Number(doelweek))
+    })
     return inWeek.filter(kd => !bestaande.some(t => 
       t.klant_id === kd.klant?.id && t.dienst_id === kd.dienst?.id && 
       t.jaar === doeljaar && t.weeknummer === doelweek
@@ -221,12 +225,12 @@ export default function AutoPlanning() {
           <div className="sg s4" style={{marginTop:14}}>
             <div className="stat sb1">
               <div className="sl">Klanten in week {doelweek}</div>
-              <div className="sv">{teGenereren.length + (klantDiensten.filter(kd => kd.weeknummers?.includes(doelweek)).length - teGenereren.length)}</div>
+              <div className="sv">{teGenereren.length + (klantDiensten.filter(kd => kd.weeknummers?.some(w => Number(w) === Number(doelweek))).length - teGenereren.length)}</div>
               <div className="sd">Op basis van weeknummers</div>
             </div>
             <div className="stat sg1">
               <div className="sl">Al gepland</div>
-              <div className="sv">{klantDiensten.filter(kd => kd.weeknummers?.includes(doelweek)).length - teGenereren.length}</div>
+              <div className="sv">{klantDiensten.filter(kd => kd.weeknummers?.some(w => Number(w) === Number(doelweek))).length - teGenereren.length}</div>
               <div className="sd">Reeds aangemaakt</div>
             </div>
             <div className="stat sa1">

@@ -1,60 +1,34 @@
-// Geocoding & Routing helpers voor Spariplan
-// Gebruikt OpenStreetMap Nominatim (geocoding) en OSRM (routing)
-// Beide gratis, open source
+// Geocoding & Routing helpers — gaat via Vercel serverless functies
+// om CORS-problemen te omzeilen
 
 import { supabase } from './supabase'
 
-// Nominatim heeft een rate limit van 1 request/sec
-// We respecteren dat strikt
-const NOMINATIM_DELAY_MS = 1100  // iets meer dan 1s voor zekerheid
-
-const NOMINATIM_BASE = 'https://nominatim.openstreetmap.org/search'
-const OSRM_BASE = 'https://router.project-osrm.org/route/v1/driving'
-const OSRM_TABLE = 'https://router.project-osrm.org/table/v1/driving'
+// Nominatim heeft 1 request/sec rate limit
+const NOMINATIM_DELAY_MS = 1100
 
 // ═══════════════════════════════════════════════════════════
 // GEOCODING — adres naar lat/lon
 // ═══════════════════════════════════════════════════════════
 
-/**
- * Geocodeer 1 adres via Nominatim
- * @param {string} adres - bijv. "Lupinestraat 33, 5561 AD Riethoven"
- * @returns {{lat, lon, display_name} | null}
- */
 export async function geocodeerAdres(adres) {
   if (!adres || adres.trim() === '') return null
   
-  // Voeg "Nederland" toe als het er niet in staat
-  let zoekQuery = adres.trim()
-  if (!zoekQuery.toLowerCase().includes('nederland') && !zoekQuery.toLowerCase().includes('netherlands')) {
-    zoekQuery += ', Nederland'
-  }
-  
-  const params = new URLSearchParams({
-    q: zoekQuery,
-    format: 'json',
-    countrycodes: 'nl',
-    limit: '1',
-    addressdetails: '1'
-  })
-  
   try {
-    const response = await fetch(`${NOMINATIM_BASE}?${params}`, {
-      headers: {
-        'User-Agent': 'Spariplan/1.0 (contact@sparidaensbv.nl)',
-        'Accept-Language': 'nl'
-      }
-    })
+    const response = await fetch(`/api/geocode?adres=${encodeURIComponent(adres)}`)
     
-    if (!response.ok) throw new Error(`Status ${response.status}`)
+    if (response.status === 404) return null
+    if (!response.ok) {
+      console.error('Geocoding response niet ok:', response.status)
+      return null
+    }
     
     const data = await response.json()
-    if (!data || data.length === 0) return null
+    if (data.error) return null
     
     return {
-      lat: parseFloat(data[0].lat),
-      lon: parseFloat(data[0].lon),
-      display_name: data[0].display_name
+      lat: data.lat,
+      lon: data.lon,
+      display_name: data.display_name
     }
   } catch (e) {
     console.error('Geocoding fout voor:', adres, e)
@@ -62,12 +36,7 @@ export async function geocodeerAdres(adres) {
   }
 }
 
-/**
- * Geocodeer alle openstaande klanten in batch
- * Met progress callback en respect voor rate limit
- */
 export async function geocodeerAlleKlanten(onProgress, onError) {
-  // Haal openstaande klanten op
   const { data: klanten, error } = await supabase
     .from('klanten')
     .select('id, naam, adres')
@@ -112,7 +81,6 @@ export async function geocodeerAlleKlanten(onProgress, onError) {
       if (onError) onError({ klant, reden: e.message })
     }
     
-    // Rate limit
     if (i < klanten.length - 1) {
       await new Promise(r => setTimeout(r, NOMINATIM_DELAY_MS))
     }
@@ -122,28 +90,21 @@ export async function geocodeerAlleKlanten(onProgress, onError) {
 }
 
 // ═══════════════════════════════════════════════════════════
-// ROUTING — afstanden tussen punten via OSRM
+// ROUTING via API proxies
 // ═══════════════════════════════════════════════════════════
 
-/**
- * Vraag een afstandsmatrix op voor een lijst coördinaten
- * @param {Array<{lat, lon}>} punten 
- * @returns {Array<Array<{distance_m, duration_s}>>}
- */
 export async function osrmTable(punten) {
   if (!punten || punten.length < 2) return null
   
   const coords = punten.map(p => `${p.lon},${p.lat}`).join(';')
-  const url = `${OSRM_TABLE}/${coords}?annotations=duration,distance`
   
   try {
-    const response = await fetch(url)
-    if (!response.ok) throw new Error(`OSRM status ${response.status}`)
+    const response = await fetch(`/api/route-table?coords=${encodeURIComponent(coords)}`)
+    if (!response.ok) throw new Error(`Status ${response.status}`)
     
     const data = await response.json()
     if (data.code !== 'Ok') throw new Error(data.message || 'OSRM error')
     
-    // Bouw matrix
     const matrix = []
     for (let i = 0; i < punten.length; i++) {
       matrix[i] = []
@@ -161,19 +122,14 @@ export async function osrmTable(punten) {
   }
 }
 
-/**
- * Vraag de werkelijke route op tussen punten in de gegeven volgorde
- * Geeft totale afstand, tijd en eventueel polyline
- */
 export async function osrmRoute(punten) {
   if (!punten || punten.length < 2) return null
   
   const coords = punten.map(p => `${p.lon},${p.lat}`).join(';')
-  const url = `${OSRM_BASE}/${coords}?overview=false`
   
   try {
-    const response = await fetch(url)
-    if (!response.ok) throw new Error(`OSRM status ${response.status}`)
+    const response = await fetch(`/api/route?coords=${encodeURIComponent(coords)}`)
+    if (!response.ok) throw new Error(`Status ${response.status}`)
     
     const data = await response.json()
     if (data.code !== 'Ok') throw new Error(data.message || 'OSRM error')
@@ -193,45 +149,32 @@ export async function osrmRoute(punten) {
 }
 
 // ═══════════════════════════════════════════════════════════
-// ROUTE OPTIMALISATIE — nearest neighbor algorithm
+// ROUTE OPTIMALISATIE — nearest neighbor + 2-opt
 // ═══════════════════════════════════════════════════════════
 
-/**
- * Optimaliseer volgorde van bezoekpunten via nearest-neighbor
- * Met optionele 2-opt verbetering
- * 
- * @param {{lat, lon}} startPunt - vertrekpunt (bedrijf)
- * @param {Array<{id, lat, lon, ...}>} bezoeken - klantbezoeken
- * @param {boolean} terug - keren we terug naar startpunt aan het eind?
- * @returns {Array} - bezoeken in optimale volgorde + meta info
- */
 export async function optimaliseerRoute(startPunt, bezoeken, terug = false) {
   if (!bezoeken || bezoeken.length === 0) {
     return { volgorde: [], totaal_afstand_m: 0, totaal_tijd_s: 0 }
   }
   if (bezoeken.length === 1) {
-    return { volgorde: bezoeken, totaal_afstand_m: 0, totaal_tijd_s: 0, debug: 'maar 1 bezoek' }
+    return { volgorde: bezoeken, totaal_afstand_m: 0, totaal_tijd_s: 0 }
   }
   
-  // Bouw alle punten: start + bezoeken (+ eindterugkeer)
   const punten = [startPunt, ...bezoeken]
-  
-  // Vraag afstandsmatrix op
   const matrix = await osrmTable(punten)
+  
   if (!matrix) {
-    // Fallback: gewoon op postcode/index sorteren
     return { 
       volgorde: bezoeken, 
       totaal_afstand_m: 0, 
       totaal_tijd_s: 0,
-      error: 'OSRM niet beschikbaar, geen optimalisatie toegepast'
+      error: 'Route service niet beschikbaar'
     }
   }
   
-  // Nearest neighbor vanaf start
   const N = punten.length
   const bezocht = new Array(N).fill(false)
-  bezocht[0] = true  // start is al "bezocht"
+  bezocht[0] = true
   
   const volgorde = []
   let huidig = 0
@@ -254,100 +197,83 @@ export async function optimaliseerRoute(startPunt, bezoeken, terug = false) {
     if (best === -1) break
     
     bezocht[best] = true
-    volgorde.push(bezoeken[best - 1])  // -1 want index 0 is startpunt
+    volgorde.push(bezoeken[best - 1])
     totaalAfstand += matrix[huidig][best].distance_m
     totaalTijd += matrix[huidig][best].duration_s
     huidig = best
   }
   
-  // 2-opt verbetering (probeer paren om te draaien voor betere route)
+  // 2-opt verbetering
   if (volgorde.length >= 3) {
-    const verbeterd = await twoOpt(volgorde, matrix, punten, startPunt)
+    const verbeterd = twoOpt(volgorde, matrix, punten)
     if (verbeterd && verbeterd.totaal_tijd_s < totaalTijd) {
+      if (terug && verbeterd.volgorde.length > 0) {
+        const laatste = bezoekIndex(verbeterd.volgorde[verbeterd.volgorde.length-1], punten)
+        verbeterd.totaal_afstand_m += matrix[laatste][0].distance_m
+        verbeterd.totaal_tijd_s += matrix[laatste][0].duration_s
+      }
       return verbeterd
     }
   }
   
-  // Optioneel: terug naar start meetellen
   if (terug && huidig !== 0) {
     totaalAfstand += matrix[huidig][0].distance_m
     totaalTijd += matrix[huidig][0].duration_s
   }
   
-  return {
-    volgorde,
-    totaal_afstand_m: totaalAfstand,
-    totaal_tijd_s: totaalTijd
-  }
+  return { volgorde, totaal_afstand_m: totaalAfstand, totaal_tijd_s: totaalTijd }
 }
 
-/**
- * 2-opt verbetering — probeer paren om te draaien
- * Dit verbetert nearest-neighbor vaak met 5-15%
- */
-async function twoOpt(volgorde, matrix, punten, startPunt) {
-  const indexLookup = new Map()
-  punten.forEach((p, i) => {
-    if (i === 0) indexLookup.set('START', 0)
-    else indexLookup.set(volgorde[i-1]?.id, i)
-  })
+function bezoekIndex(bezoek, punten) {
+  for (let i = 1; i < punten.length; i++) {
+    if (punten[i].id === bezoek.id) return i
+  }
+  return -1
+}
+
+function twoOpt(volgorde, matrix, punten) {
+  const lookup = new Map()
+  punten.slice(1).forEach((p, i) => { lookup.set(p.id, i + 1) })
   
-  // Maak een map: bezoek-id naar matrix-index
-  const bezoekIndex = new Map()
-  punten.slice(1).forEach((p, i) => {
-    bezoekIndex.set(p.id, i + 1)
-  })
-  
-  let huidigeRoute = [...volgorde]
-  let verbeterd = true
-  let iteraties = 0
-  const maxIteraties = 20
-  
-  function berekenTotaal(route) {
-    let t = 0
-    let prev = 0  // start
+  function bereken(route) {
+    let t = 0, a = 0, prev = 0
     for (const r of route) {
-      const idx = bezoekIndex.get(r.id)
+      const idx = lookup.get(r.id)
       t += matrix[prev][idx].duration_s
+      a += matrix[prev][idx].distance_m
       prev = idx
     }
-    return t
+    return { tijd: t, afstand: a }
   }
   
-  let bestTijd = berekenTotaal(huidigeRoute)
-  let bestAfstand = 0
+  let huidig = [...volgorde]
+  let { tijd: bestTijd, afstand: bestAfstand } = bereken(huidig)
+  let verbeterd = true
+  let iter = 0
   
-  while (verbeterd && iteraties < maxIteraties) {
+  while (verbeterd && iter < 20) {
     verbeterd = false
-    iteraties++
+    iter++
     
-    for (let i = 0; i < huidigeRoute.length - 1; i++) {
-      for (let j = i + 1; j < huidigeRoute.length; j++) {
-        // Probeer i..j om te draaien
-        const nieuweRoute = [...huidigeRoute]
-        const segment = nieuweRoute.slice(i, j + 1).reverse()
-        nieuweRoute.splice(i, segment.length, ...segment)
+    for (let i = 0; i < huidig.length - 1; i++) {
+      for (let j = i + 1; j < huidig.length; j++) {
+        const nieuw = [...huidig]
+        const segm = nieuw.slice(i, j + 1).reverse()
+        nieuw.splice(i, segm.length, ...segm)
         
-        const nieuweTijd = berekenTotaal(nieuweRoute)
-        if (nieuweTijd < bestTijd) {
-          bestTijd = nieuweTijd
-          huidigeRoute = nieuweRoute
+        const { tijd, afstand } = bereken(nieuw)
+        if (tijd < bestTijd) {
+          bestTijd = tijd
+          bestAfstand = afstand
+          huidig = nieuw
           verbeterd = true
         }
       }
     }
   }
   
-  // Herbereken afstand
-  let prev = 0
-  for (const r of huidigeRoute) {
-    const idx = bezoekIndex.get(r.id)
-    bestAfstand += matrix[prev][idx].distance_m
-    prev = idx
-  }
-  
   return {
-    volgorde: huidigeRoute,
+    volgorde: huidig,
     totaal_afstand_m: bestAfstand,
     totaal_tijd_s: bestTijd
   }
