@@ -84,7 +84,7 @@ export default function AutoPlanning() {
   async function laadAlles() {
     const [kdRes, takenRes, historieRes, medRes] = await Promise.all([
       supabase.from('klant_diensten').select(`
-        id, weeknummers, vaste_prijs, geplande_minuten, bijzondere_instructie, actief,
+        id, weeknummers, vaste_prijs, geplande_minuten, bijzondere_instructie,
         voorkeur_dag, voorkeur_dagdeel, voorkeur_medewerker_id, voorkeur_hardheid,
         klant:klanten(id, naam, regio, adres, postcode_cijfers),
         dienst:diensten(id, naam)
