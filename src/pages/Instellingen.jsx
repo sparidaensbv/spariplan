@@ -83,10 +83,15 @@ export default function Instellingen() {
             <label className="fl">Straal werkgebied (km)</label>
             <input type="number" className="fi" style={{maxWidth:120}} value={instelling.werkgebied_radius_km || 30} onChange={e => update('werkgebied_radius_km', parseInt(e.target.value))} />
           </div>
-          <div className="fg">
-            <label style={{display:'flex', alignItems:'center', gap:8, fontSize:13, cursor:'pointer'}}>
-              <input type="checkbox" checked={instelling.zaterdag_werkdag || false} onChange={e => update('zaterdag_werkdag', e.target.checked)} />
-              Zaterdag is een werkdag
+          <div className="fg" style={{padding:'10px 14px', background:'var(--gray-50)', borderRadius:7}}>
+            <label style={{display:'flex', alignItems:'center', gap:10, fontSize:13, cursor:'pointer'}}>
+              <input type="checkbox" checked={instelling.zaterdag_werkdag || false} onChange={e => update('zaterdag_werkdag', e.target.checked)} style={{width:18, height:18}} />
+              <div>
+                <div style={{fontWeight:700}}>Zaterdag inschakelen als reservedag</div>
+                <div style={{fontSize:11, color:'var(--gray-500)', marginTop:2}}>
+                  Auto-planning vult eerst ma-vr volledig. Pas wanneer er geen ruimte meer is op werkdagen, gaat de overflow naar zaterdag.
+                </div>
+              </div>
             </label>
           </div>
         </div>
@@ -114,6 +119,24 @@ export default function Instellingen() {
               <input type="number" className="fi" value={instelling.auto_bijstellen_na_x_keer || 3} onChange={e => update('auto_bijstellen_na_x_keer', parseInt(e.target.value))} />
               <div style={{fontSize:10.5, color:'var(--gray-400)', marginTop:4}}>Aantal opvolgende afwijkingen voor automatische aanpassing</div>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="card" style={{marginBottom:14, background:'var(--brand-50)', border:'1px solid var(--brand-light)'}}>
+        <div className="cb" style={{padding:'14px'}}>
+          <div style={{display:'flex', alignItems:'center', gap:14}}>
+            <div style={{fontSize:24}}>🎯</div>
+            <div style={{flex:1}}>
+              <div style={{fontSize:13, fontWeight:700, color:'var(--brand)'}}>Planningsvolgorde per medewerker</div>
+              <div style={{fontSize:11.5, color:'var(--gray-700)', marginTop:3}}>
+                Prioriteit instellen welke medewerker als eerste wordt ingepland (Emar primair, Twan secundair, etc.)
+                doe je via de <strong>Medewerkers</strong>-pagina.
+              </div>
+            </div>
+            <a href="/medewerkers" className="btn bp bsm" style={{textDecoration:'none'}}>
+              → Naar Medewerkers
+            </a>
           </div>
         </div>
       </div>

@@ -1,13 +1,16 @@
 import { useEffect, useState, useMemo } from 'react'
 import { supabase } from '../lib/supabase'
 
-const DAGEN = [
+const DAGEN_WERKDAGEN = [
   { key: 1, naam: 'maandag', label: 'Ma' },
   { key: 2, naam: 'dinsdag', label: 'Di' },
   { key: 3, naam: 'woensdag', label: 'Wo' },
   { key: 4, naam: 'donderdag', label: 'Do' },
   { key: 5, naam: 'vrijdag', label: 'Vr' },
 ]
+const ZATERDAG = { key: 6, naam: 'zaterdag', label: 'Za' }
+// Voor compatibiliteit met bestaande code
+const DAGEN = DAGEN_WERKDAGEN
 
 // Pasen → feestdagen
 function getPasen(jaar) {
@@ -78,11 +81,12 @@ export default function AutoPlanning() {
   const [doelweek, setDoelweek] = useState(getISOWeek(new Date()).week + 1)
   const [doeljaar, setDoeljaar] = useState(2026)
   const [voorbeeld, setVoorbeeld] = useState(null)
+  const [instelling, setInstelling] = useState(null)
 
   useEffect(() => { laadAlles() }, [])
 
   async function laadAlles() {
-    const [kdRes, takenRes, historieRes, medRes] = await Promise.all([
+    const [kdRes, takenRes, historieRes, medRes, instRes] = await Promise.all([
       supabase.from('klant_diensten').select(`
         id, weeknummers, vaste_prijs, geplande_minuten, bijzondere_instructie,
         voorkeur_dag, voorkeur_dagdeel, voorkeur_medewerker_id, voorkeur_hardheid,
@@ -91,12 +95,14 @@ export default function AutoPlanning() {
       `).limit(5000),
       supabase.from('taken').select('klant_id, dienst_id, jaar, weeknummer').limit(5000),
       supabase.from('taken').select('klant_dienst_id, medewerker_id, status').not('medewerker_id', 'is', null).limit(5000),
-      supabase.from('medewerkers').select('*').eq('actief', true).order('naam')
+      supabase.from('medewerkers').select('*').eq('actief', true).order('prioriteit'),
+      supabase.from('instellingen').select('*').limit(1).maybeSingle()
     ])
     setKlantDiensten(kdRes.data || [])
     setBestaande(takenRes.data || [])
     setHistorie(historieRes.data || [])
     setMedewerkers(medRes.data || [])
+    setInstelling(instRes.data || null)
     setLoading(false)
   }
 
@@ -133,7 +139,7 @@ export default function AutoPlanning() {
   // Voorbeeld genereren (preview, niet opslaan)
   function genereerVoorbeeld() {
     const feestdagen = getCAOFeestdagen(doeljaar)
-    const result = doSmartPlanning(teGenereren, medewerkers, doeljaar, doelweek, feestdagen, historischeVoorkeur)
+    const result = doSmartPlanning(teGenereren, medewerkers, doeljaar, doelweek, feestdagen, historischeVoorkeur, instelling?.zaterdag_werkdag || false)
     setVoorbeeld(result)
   }
 
@@ -294,10 +300,13 @@ export default function AutoPlanning() {
 // ═══════════════════════════════════════════════════════════
 // SLIMME PLANNING ALGORITME
 // ═══════════════════════════════════════════════════════════
-function doSmartPlanning(klantDiensten, medewerkers, jaar, week, feestdagen, historischeVoorkeur) {
-  // Stap 1: Bepaal beschikbare werkdagen (geen feestdagen)
-  const werkdagen = DAGEN.filter(d => !isFeestdag(jaar, week, d.key, feestdagen))
-  const geblokkeerdeDagen = DAGEN.filter(d => isFeestdag(jaar, week, d.key, feestdagen))
+function doSmartPlanning(klantDiensten, medewerkers, jaar, week, feestdagen, historischeVoorkeur, zaterdagToegestaan = false) {
+  // Stap 1: Bepaal beschikbare werkdagen (ma-vr, eventueel zaterdag, geen feestdagen)
+  const basisDagen = zaterdagToegestaan 
+    ? [...DAGEN_WERKDAGEN, ZATERDAG]
+    : DAGEN_WERKDAGEN
+  const werkdagen = basisDagen.filter(d => !isFeestdag(jaar, week, d.key, feestdagen))
+  const geblokkeerdeDagen = basisDagen.filter(d => isFeestdag(jaar, week, d.key, feestdagen))
     .map(d => ({...d, feest: isFeestdag(jaar, week, d.key, feestdagen)}))
   
   // Stap 2: Verzamel medewerker-belasting
@@ -348,12 +357,35 @@ function doSmartPlanning(klantDiensten, medewerkers, jaar, week, feestdagen, his
         if (clusterMed) medewerker_id = clusterMed.medewerker_id
       }
     }
-    // 5. Minst belaste medewerker
+    // 5. Op basis van PRIORITEIT — laagste prioriteit-getal eerst (1 = primair)
+    // Met ruimte-check: lagere prioriteit pas aan de beurt als hogere prioriteit vol zit
     if (!medewerker_id) {
-      const sortedByLoad = medewerkers
-        .map(m => ({ m, total: Object.values(belasting[m.id]).reduce((s,v) => s+v, 0) }))
-        .sort((a, b) => a.total - b.total)
-      medewerker_id = sortedByLoad[0]?.m.id
+      const maxPerWeek = 40 * 60  // 40 uur in minuten
+      
+      // Sorteer medewerkers op prioriteit (laagste getal = hoogste prio)
+      const gesorteerd = [...medewerkers].sort((a, b) => {
+        const pa = a.prioriteit ?? 5
+        const pb = b.prioriteit ?? 5
+        if (pa !== pb) return pa - pb
+        // Bij gelijke prio: minst belast eerst
+        const ta = Object.values(belasting[a.id]).reduce((s,v) => s+v, 0)
+        const tb = Object.values(belasting[b.id]).reduce((s,v) => s+v, 0)
+        return ta - tb
+      })
+      
+      // Loop door gesorteerde lijst — eerste die nog ruimte heeft krijgt de klus
+      for (const med of gesorteerd) {
+        const totaal = Object.values(belasting[med.id]).reduce((s,v) => s+v, 0)
+        if (totaal + (kd.geplande_minuten || 0) <= maxPerWeek) {
+          medewerker_id = med.id
+          break
+        }
+      }
+      
+      // Als helemaal niemand ruimte heeft: minst belaste sowieso
+      if (!medewerker_id) {
+        medewerker_id = gesorteerd[0]?.id
+      }
     }
     
     if (!medewerker_id) {
@@ -377,28 +409,36 @@ function doSmartPlanning(klantDiensten, medewerkers, jaar, week, feestdagen, his
     // 2. Anders: minst belaste dag voor deze medewerker, voorrang aan dagen waar al iemand uit zelfde postcode zit
     if (!dagKey) {
       const eigenPostcode = kd.klant?.postcode_cijfers
-      // Zoek dagen waar deze medewerker al taken heeft in dezelfde postcode
-      const dagenMetCluster = werkdagen.map(d => {
-        const taakInDag = taken.find(t => 
-          t.medewerker_id === medewerker_id && 
-          t.dag === d.key && 
-          t.postcode === eigenPostcode
-        )
-        return { dag: d, heeftCluster: !!taakInDag, belasting: belasting[medewerker_id][d.key] }
-      })
-      .filter(x => x.belasting + (kd.geplande_minuten || 0) <= 480)  // max 8u/dag
-      .sort((a, b) => {
-        if (a.heeftCluster !== b.heeftCluster) return b.heeftCluster - a.heeftCluster  // cluster eerst
-        return a.belasting - b.belasting  // dan minst belast
-      })
       
-      if (dagenMetCluster.length > 0) {
-        dagKey = dagenMetCluster[0].dag.key
-      } else {
-        // Te druk overal — kies minst belaste medewerker/dag combinatie
+      // Eerst alleen ma-vr proberen (zaterdag uitsluiten als overflow)
+      const wekendagen = werkdagen.filter(d => d.key !== 6)
+      const zaterdagen = werkdagen.filter(d => d.key === 6)
+      
+      function vindBesteDag(dagenLijst) {
+        const opties = dagenLijst.map(d => {
+          const taakInDag = taken.find(t => 
+            t.medewerker_id === medewerker_id && 
+            t.dag === d.key && 
+            t.postcode === eigenPostcode
+          )
+          return { dag: d, heeftCluster: !!taakInDag, belasting: belasting[medewerker_id][d.key] }
+        })
+        .filter(x => x.belasting + (kd.geplande_minuten || 0) <= 480)
+        .sort((a, b) => {
+          if (a.heeftCluster !== b.heeftCluster) return b.heeftCluster - a.heeftCluster
+          return a.belasting - b.belasting
+        })
+        return opties[0]?.dag.key || null
+      }
+      
+      // Probeer eerst werkdagen ma-vr
+      dagKey = vindBesteDag(wekendagen)
+      
+      // Als dat niet lukt: probeer een andere medewerker met ma-vr
+      if (!dagKey) {
         let beste = { mid: null, dag: null, total: Infinity }
         medewerkers.forEach(m => {
-          werkdagen.forEach(d => {
+          wekendagen.forEach(d => {
             const t = belasting[m.id][d.key]
             if (t + (kd.geplande_minuten || 0) <= 480 && t < beste.total) {
               beste = { mid: m.id, dag: d.key, total: t }
@@ -408,6 +448,27 @@ function doSmartPlanning(klantDiensten, medewerkers, jaar, week, feestdagen, his
         if (beste.mid) {
           medewerker_id = beste.mid
           dagKey = beste.dag
+        }
+      }
+      
+      // Pas als laatste resort: zaterdag (alleen als toegestaan)
+      if (!dagKey && zaterdagen.length > 0) {
+        dagKey = vindBesteDag(zaterdagen)
+        if (!dagKey) {
+          // Andere medewerker op zaterdag
+          let beste = { mid: null, dag: null, total: Infinity }
+          medewerkers.forEach(m => {
+            zaterdagen.forEach(d => {
+              const t = belasting[m.id][d.key]
+              if (t + (kd.geplande_minuten || 0) <= 480 && t < beste.total) {
+                beste = { mid: m.id, dag: d.key, total: t }
+              }
+            })
+          })
+          if (beste.mid) {
+            medewerker_id = beste.mid
+            dagKey = beste.dag
+          }
         }
       }
     }
