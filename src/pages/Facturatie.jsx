@@ -21,7 +21,7 @@ export default function Facturatie({ profile }) {
         id, jaar, weeknummer, geplande_datum, geplande_minuten, werkelijke_minuten,
         vaste_prijs, status, factuur_status, klaar_op, factuur_verstuurd_op,
         notitie_medewerker, bijzondere_instructie, medewerker_id,
-        klant:klanten(naam, klantnummer, adres, factuur_email, factuur_methode),
+        klant:klanten(naam, klantnummer, adres),
         dienst:diensten(naam),
         medewerker:medewerkers(naam, kleur, id)
       `)
@@ -30,7 +30,10 @@ export default function Facturatie({ profile }) {
       supabase.from('medewerkers').select('*').order('naam')
     ])
     
-    if (takenRes.error) console.error('Facturatie load error:', takenRes.error)
+    if (takenRes.error) {
+      console.error('Facturatie load error:', JSON.stringify(takenRes.error, null, 2))
+      alert('Fout bij laden: ' + (takenRes.error.message || 'onbekend'))
+    }
     
     // Sorteer client-side: meest recent eerst, NULLs achteraan
     const sorted = (takenRes.data || []).sort((a, b) => {
